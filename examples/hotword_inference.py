@@ -66,12 +66,13 @@ def main():
         help="Path to Fun-ASR model.py (default: auto-detect from Fun-ASR project)",
     )
     parser.add_argument("--language", type=str, default=None, help="Force language (e.g. Chinese, English)")
-    parser.add_argument("--top_k", type=int, default=50, help="PhonemeCorrector candidate count")
+    parser.add_argument("--top_k", type=int, default=30, help="PhonemeCorrector candidate count")
     parser.add_argument("--max_hotwords", type=int, default=30, help="Max hotwords injected into context")
     parser.add_argument("--threshold", type=float, default=0.7, help="PhonemeCorrector match threshold")
     parser.add_argument("--similar_threshold", type=float, default=0.5, help="PhonemeCorrector similar threshold")
     parser.add_argument("--device", type=str, default="cuda:0", help="Torch device")
     parser.add_argument("--no_hotword", action="store_true", help="Run vanilla transcription (no RAG hotword)")
+    parser.add_argument("--parallel", action="store_true", help="Run CTC retrieval and Qwen3-ASR audio encoding in parallel")
     parser.add_argument("--context", type=str, default="", help="Manual context string (vanilla mode only)")
     args = parser.parse_args()
 
@@ -142,6 +143,7 @@ def main():
         n_loaded = retriever.load_hotwords(args.hotwords)
         print(f"  CTC retriever loaded in {time.time() - t0:.1f}s ({n_loaded} hotwords)")
 
+        # ---- Serial: CTC + retrieval (for breakdown timing) ----
         print_separator("Step 3: CTC encode + decode + hotword retrieval")
 
         # 3a. CTC audio encoding + greedy decode
@@ -149,7 +151,7 @@ def main():
         ctc_text = retriever.ctc_decode(args.audio)
         t_ctc_decode = time.time() - t_ctc_start
 
-        # 3b. Phoneme-based hotword retrieval (FastRAG + AccuRAG)
+        # 3b. Full retrieve (includes 2nd CTC decode + PhonemeCorrector)
         t_retrieve_start = time.time()
         rr = retriever.retrieve(args.audio, top_k=args.top_k, max_hotwords=args.max_hotwords)
         t_retrieve = time.time() - t_retrieve_start
@@ -176,11 +178,10 @@ def main():
 
         print(f"\n  Context string:  \"{rr.context_string}\"")
 
-        # Step 4: Pure Qwen3-ASR inference (use context from Step 3 directly,
-        #         avoid redundant CTC retrieval inside transcribe_hotword)
-        print_separator("Step 4: Running Qwen3-ASR with hotword context")
+        # ---- Serial ASR (for comparison baseline) ----
+        print_separator("Step 4: Running Qwen3-ASR with hotword context (serial)")
         t_asr_start = time.time()
-        results = asr.transcribe_vanilla(
+        results_serial = asr.transcribe_vanilla(
             audio=args.audio,
             context=rr.context_string,
             language=args.language,
@@ -188,25 +189,46 @@ def main():
         )
         t_asr = time.time() - t_asr_start
 
-        r = results[0]
+        r = results_serial[0]
         print(f"  Language:        {r.language}")
         print(f"  Text:            {r.text}")
         print(f"  Qwen3-ASR time:  {t_asr:.3f}s  (audio encoder + LLM generate)")
         print(f"  Context used:    \"{rr.context_string}\"")
 
-        # --- Timing summary ---
-        t_e2e = t_hotword_total + t_asr
+        t_serial_e2e = t_hotword_total + t_asr
+
+        # ---- Parallel run (if requested) ----
+        if args.parallel:
+            print_separator("Step 5: Parallel hotword transcription")
+            t_par_start = time.time()
+            results_par = asr.transcribe_hotword(
+                audio=args.audio,
+                hotword_retriever=retriever,
+                language=args.language,
+                return_time_stamps=False,
+                top_k=args.top_k,
+                max_hotwords=args.max_hotwords,
+                parallel=True,
+            )
+            t_par_e2e = time.time() - t_par_start
+
+            rp = results_par[0]
+            print(f"  Language:        {rp.language}")
+            print(f"  Text:            {rp.text}")
+            print(f"  Parallel e2e:    {t_par_e2e:.3f}s")
+            print(f"  Context used:    \"{rp.context_used}\"")
+
+        # ---- Timing summary ----
         print_separator("Timing Summary")
         print(f"  [CTC decode]       {t_ctc_decode:7.3f}s  |  Fun-ASR-Nano encoder + CTC greedy")
         print(f"  [Hotword retrieve] {t_retrieve:7.3f}s  |  CTC decode (2nd) + PhonemeCorrector")
         print(f"  [Qwen3-ASR]        {t_asr:7.3f}s  |  Audio encoder + LLM generate")
         print(f"  {'─' * 50}")
-        print(f"  [End-to-end]       {t_e2e:7.3f}s  (serial)")
-        print()
-        overlap = min(t_ctc_decode + t_retrieve, t_asr)
-        t_parallel_est = max(t_ctc_decode + t_retrieve, t_asr) + min(0, 0)
-        print(f"  * If parallelized: ~{t_parallel_est:.3f}s  "
-              f"(save ~{t_e2e - t_parallel_est:.3f}s / {(t_e2e - t_parallel_est) / t_e2e * 100:.0f}%)")
+        print(f"  [Serial e2e]       {t_serial_e2e:7.3f}s")
+        if args.parallel:
+            saved = t_serial_e2e - t_par_e2e
+            pct = saved / t_serial_e2e * 100 if t_serial_e2e > 0 else 0
+            print(f"  [Parallel e2e]     {t_par_e2e:7.3f}s  (saved {saved:.3f}s / {pct:.0f}%)")
 
     else:
         # --- Vanilla mode ---

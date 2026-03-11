@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
@@ -324,6 +326,7 @@ class Qwen3ASRModel:
         hotwords: Optional[Union[str, List[str]]] = None,
         top_k: int = 50,
         max_hotwords: int = 30,
+        parallel: bool = False,
     ) -> List[Union[ASRTranscription, "HotwordTranscription"]]:
         """
         Unified transcription entry point.
@@ -357,6 +360,9 @@ class Qwen3ASRModel:
                 Number of PhonemeCorrector candidates (hotword mode only).
             max_hotwords:
                 Maximum hotwords injected into context (hotword mode only).
+            parallel:
+                If True, overlap CTC retrieval with Qwen3-ASR audio encoding
+                (transformers backend, single audio only).
 
         Returns:
             List of ASRTranscription (vanilla) or HotwordTranscription (hotword mode).
@@ -371,6 +377,7 @@ class Qwen3ASRModel:
                 return_time_stamps=return_time_stamps,
                 top_k=top_k,
                 max_hotwords=max_hotwords,
+                parallel=parallel,
             )
 
         return self.transcribe_vanilla(
@@ -389,6 +396,7 @@ class Qwen3ASRModel:
         return_time_stamps: bool = False,
         top_k: int = 50,
         max_hotwords: int = 30,
+        parallel: bool = False,
     ) -> List["HotwordTranscription"]:
         """
         Hotword-enhanced transcription using external CTC-based retrieval.
@@ -396,7 +404,11 @@ class Qwen3ASRModel:
         For each audio sample:
           1. Run CTCHotwordRetriever to get rough CTC text and retrieve hotwords.
           2. Format hotwords as a context string.
-          3. Call transcribe_vanilla with the generated context.
+          3. Call Qwen3-ASR with the generated context.
+
+        When ``parallel=True`` (transformers backend only), the CTC pipeline
+        and Qwen3-ASR audio encoder run concurrently in separate threads,
+        reducing end-to-end latency.
 
         Args:
             audio: Audio input(s) -- same formats as transcribe_vanilla.
@@ -405,6 +417,9 @@ class Qwen3ASRModel:
             return_time_stamps: Whether to produce timestamps.
             top_k: PhonemeCorrector candidate count.
             max_hotwords: Max hotwords to inject.
+            parallel: If True, overlap CTC retrieval with Qwen3-ASR audio
+                      encoding.  Only supported for the transformers backend
+                      with a single audio input.
 
         Returns:
             List[HotwordTranscription]: One result per audio, including retrieval metadata.
@@ -414,6 +429,22 @@ class Qwen3ASRModel:
         else:
             audio_list = audio
 
+        # --- parallel fast-path (single audio, transformers only) ----------
+        if (
+            parallel
+            and self.backend == "transformers"
+            and len(audio_list) == 1
+            and not return_time_stamps
+        ):
+            return self._transcribe_hotword_parallel(
+                audio_list[0],
+                hotword_retriever=hotword_retriever,
+                language=language[0] if isinstance(language, list) else language,
+                top_k=top_k,
+                max_hotwords=max_hotwords,
+            )
+
+        # --- serial path (original logic) ----------------------------------
         n = len(audio_list)
 
         contexts: List[str] = []
@@ -445,6 +476,111 @@ class Qwen3ASRModel:
             ))
 
         return hotword_results
+
+    @torch.no_grad()
+    def _transcribe_hotword_parallel(
+        self,
+        audio: AudioLike,
+        hotword_retriever: Any,
+        language: Optional[str] = None,
+        top_k: int = 50,
+        max_hotwords: int = 30,
+    ) -> List["HotwordTranscription"]:
+        """
+        Parallel hotword transcription for a single audio (transformers only).
+
+        Overlaps CTC-based hotword retrieval with Qwen3-ASR audio encoding
+        using two threads, then runs LLM generation serially.
+
+        Timeline::
+
+            Thread-A: [Nano encoder + CTC] -> [PhonemeCorrector (CPU)]──┐
+            Thread-B: [mel (CPU)] -> [AudioTower (GPU)]                 ├→ LLM generate
+                                                                        ┘
+        """
+        import time as _time
+
+        logger = logging.getLogger(__name__)
+
+        wav = normalize_audios(audio)[0]
+
+        lang_norm: Optional[str] = None
+        if language is not None and str(language).strip():
+            lang_norm = normalize_language_name(str(language))
+            validate_language(lang_norm)
+
+        use_cuda_streams = self.device is not None and self.device.type == "cuda"
+
+        # Wrappers that run tasks under separate CUDA streams so the two
+        # GPU-bound workloads (Nano encoder vs AudioTower) can overlap.
+        def _ctc_task():
+            if use_cuda_streams:
+                with torch.cuda.stream(torch.cuda.Stream(self.device)):
+                    with torch.no_grad():
+                        return hotword_retriever.retrieve(
+                            audio, top_k=top_k, max_hotwords=max_hotwords,
+                        )
+            else:
+                with torch.no_grad():
+                    return hotword_retriever.retrieve(
+                        audio, top_k=top_k, max_hotwords=max_hotwords,
+                    )
+
+        def _audio_task():
+            if use_cuda_streams:
+                with torch.cuda.stream(torch.cuda.Stream(self.device)):
+                    with torch.no_grad():
+                        return self._pre_encode_audio(wav)
+            else:
+                with torch.no_grad():
+                    return self._pre_encode_audio(wav)
+
+        # --- launch two concurrent tasks ---
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            t_start = _time.monotonic()
+
+            # Thread A: CTC encode + decode + PhonemeCorrector
+            future_ctc = pool.submit(_ctc_task)
+
+            # Thread B: Qwen3-ASR mel extraction + audio_tower
+            future_audio = pool.submit(_audio_task)
+
+            rr = future_ctc.result()
+            pre_encoded = future_audio.result()
+
+            # Synchronize CUDA to make sure both streams finished
+            if use_cuda_streams:
+                torch.cuda.synchronize(self.device)
+
+            t_parallel = _time.monotonic() - t_start
+
+        # --- serial: LLM generation with pre-computed embeddings ---
+        t_llm_start = _time.monotonic()
+        raw_text = self._generate_with_audio_embeds(
+            pre_encoded=pre_encoded,
+            wav=wav,
+            context=rr.context_string,
+            language=lang_norm,
+        )
+        t_llm = _time.monotonic() - t_llm_start
+
+        lang_out, text_out = parse_asr_output(raw_text, user_language=lang_norm)
+
+        logger.info(
+            f"Parallel hotword: overlap={t_parallel:.3f}s, "
+            f"llm={t_llm:.3f}s, total={t_parallel + t_llm:.3f}s"
+        )
+
+        return [HotwordTranscription(
+            language=lang_out,
+            text=text_out,
+            time_stamps=None,
+            ctc_text=rr.ctc_text,
+            retrieved_hotwords=rr.retrieved_hotwords,
+            hotword_scores=rr.hotword_scores,
+            context_used=rr.context_string,
+            retrieval_details=rr.details,
+        )]
 
     @torch.no_grad()
     def transcribe_vanilla(
@@ -685,6 +821,130 @@ class Qwen3ASRModel:
             for o in outputs:
                 outs.append(o.outputs[0].text)
         return outs
+
+    # ------------------------------------------------------------------
+    # Parallel hotword helpers (transformers backend only)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _pre_encode_audio(self, wav: np.ndarray) -> Dict[str, Any]:
+        """
+        Pre-compute audio embeddings without requiring a context string.
+
+        This runs the WhisperFeatureExtractor (CPU) and audio_tower encoder
+        (GPU) ahead of time so that the result can later be merged with a text
+        prompt produced after hotword retrieval finishes.
+
+        Args:
+            wav: Mono 16 kHz float32 waveform (np.ndarray).
+
+        Returns:
+            Dict with ``audio_features`` (Tensor), ``feature_attention_mask``
+            (Tensor) and ``output_lengths`` (Tensor).
+        """
+        from qwen_asr.core.transformers_backend.processing_qwen3_asr import (
+            _get_feat_extract_output_lengths,
+        )
+
+        thinker = self.model.thinker
+
+        # --- mel spectrogram (CPU) ---
+        # Use the *exact* same kwargs as Qwen3ASRProcessor.__call__ to ensure
+        # identical mel features + attention_mask.
+        mel = self.processor.feature_extractor(
+            [wav],
+            sampling_rate=16000,
+            return_attention_mask=True,
+            return_tensors="pt",
+            padding=True,
+            truncation=False,
+        )
+        input_features = mel["input_features"].to(self.device, self.dtype)
+        feat_attn_mask = mel["attention_mask"].to(self.device)
+
+        # --- audio tower / Whisper encoder (GPU) ---
+        audio_features = thinker.get_audio_features(
+            input_features,
+            feature_attention_mask=feat_attn_mask,
+        )
+
+        feat_lengths = feat_attn_mask.sum(-1)
+        output_lengths = _get_feat_extract_output_lengths(feat_lengths)
+
+        return {
+            "audio_features": audio_features,
+            "feature_attention_mask": feat_attn_mask,
+            "output_lengths": output_lengths,
+        }
+
+    @torch.no_grad()
+    def _generate_with_audio_embeds(
+        self,
+        pre_encoded: Dict[str, Any],
+        wav: np.ndarray,
+        context: str,
+        language: Optional[str],
+    ) -> str:
+        """
+        Run LLM generation using pre-computed audio embeddings + context.
+
+        This skips the audio_tower inside ``model.generate()`` by building
+        ``inputs_embeds`` manually and passing ``input_features=None``.
+
+        Args:
+            pre_encoded: Output of :meth:`_pre_encode_audio`.
+            wav: Original waveform (used only to verify length consistency).
+            context: Hotword context string.
+            language: Optional forced language.
+
+        Returns:
+            Raw decoded string from the LLM.
+        """
+        thinker = self.model.thinker
+
+        # 1. Build text prompt with context
+        text_prompt = self._build_text_prompt(context=context, force_language=language)
+
+        # 2. Expand audio placeholder tokens to the correct count
+        output_lengths = pre_encoded["output_lengths"]
+        expanded_text = self.processor.replace_multimodal_special_tokens(
+            [text_prompt], iter(output_lengths),
+        )
+
+        # 3. Tokenize
+        text_inputs = self.processor.tokenizer(
+            expanded_text, return_tensors="pt", padding=True,
+        )
+        input_ids = text_inputs["input_ids"].to(self.device)
+        attention_mask = text_inputs["attention_mask"].to(self.device)
+
+        # 4. Build merged embeddings (text + audio)
+        inputs_embeds = thinker.get_input_embeddings()(input_ids)
+        audio_features = pre_encoded["audio_features"].to(inputs_embeds.dtype)
+
+        audio_mask = (input_ids == thinker.config.audio_token_id)
+        audio_mask_3d = audio_mask.unsqueeze(-1).expand_as(inputs_embeds)
+        inputs_embeds = inputs_embeds.masked_scatter(audio_mask_3d, audio_features)
+
+        # 5. Generate — input_features=None skips audio_tower in forward()
+        #    eos_token_id must match Qwen3ASRForConditionalGeneration.generate() defaults
+        gen_out = thinker.generate(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            input_features=None,
+            feature_attention_mask=pre_encoded["feature_attention_mask"],
+            max_new_tokens=self.max_new_tokens,
+            eos_token_id=[151645, 151643],
+            return_dict_in_generate=True,
+        )
+
+        decoded = self.processor.batch_decode(
+            gen_out.sequences[:, input_ids.shape[1]:],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        return decoded[0]
 
     def _offset_align_result(self, result: Any, offset_sec: float) -> Any:
         """
