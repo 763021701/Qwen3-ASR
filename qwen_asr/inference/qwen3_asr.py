@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -72,6 +72,23 @@ class ASRTranscription:
     language: str
     text: str
     time_stamps: Optional[Any] = None
+
+
+@dataclass
+class HotwordTranscription:
+    """
+    Transcription result with RAG hotword retrieval metadata.
+
+    Extends ASRTranscription fields with CTC and hotword information.
+    """
+    language: str
+    text: str
+    time_stamps: Optional[Any] = None
+    ctc_text: str = ""
+    retrieved_hotwords: List[str] = field(default_factory=list)
+    hotword_scores: Dict[str, float] = field(default_factory=dict)
+    context_used: str = ""
+    retrieval_details: Optional[Any] = None
 
 
 @dataclass
@@ -303,9 +320,142 @@ class Qwen3ASRModel:
         context: Union[str, List[str]] = "",
         language: Optional[Union[str, List[Optional[str]]]] = None,
         return_time_stamps: bool = False,
+        hotword_retriever: Optional[Any] = None,
+        hotwords: Optional[Union[str, List[str]]] = None,
+        top_k: int = 50,
+        max_hotwords: int = 30,
+    ) -> List[Union[ASRTranscription, "HotwordTranscription"]]:
+        """
+        Unified transcription entry point.
+
+        When ``hotword_retriever`` is provided (a :class:`CTCHotwordRetriever`),
+        hotword-enhanced transcription is used: CTC rough decode -> phoneme
+        retrieval -> inject hotwords as context -> Qwen3-ASR final decode.
+
+        Otherwise falls through to the vanilla (original) transcription path.
+
+        Args:
+            audio:
+                Audio input(s). Supported:
+                  - str: local path / URL / base64 data url
+                  - (np.ndarray, sr)
+                  - list of above
+            context:
+                Context string(s). Only used in vanilla mode.
+            language:
+                Optional language(s). If provided, it must be in supported languages.
+            return_time_stamps:
+                If True, timestamps are produced via forced aligner.
+            hotword_retriever:
+                Optional CTCHotwordRetriever instance. When set, enables RAG
+                hotword mode and ``context`` is ignored (replaced by retrieved
+                hotwords).
+            hotwords:
+                Optional hotword source (file path or list of strings).
+                Auto-loaded into ``hotword_retriever`` if provided.
+            top_k:
+                Number of PhonemeCorrector candidates (hotword mode only).
+            max_hotwords:
+                Maximum hotwords injected into context (hotword mode only).
+
+        Returns:
+            List of ASRTranscription (vanilla) or HotwordTranscription (hotword mode).
+        """
+        if hotword_retriever is not None:
+            if hotwords is not None:
+                hotword_retriever.load_hotwords(hotwords)
+            return self.transcribe_hotword(
+                audio=audio,
+                hotword_retriever=hotword_retriever,
+                language=language,
+                return_time_stamps=return_time_stamps,
+                top_k=top_k,
+                max_hotwords=max_hotwords,
+            )
+
+        return self.transcribe_vanilla(
+            audio=audio,
+            context=context,
+            language=language,
+            return_time_stamps=return_time_stamps,
+        )
+
+    @torch.no_grad()
+    def transcribe_hotword(
+        self,
+        audio: Union[AudioLike, List[AudioLike]],
+        hotword_retriever: Any,
+        language: Optional[Union[str, List[Optional[str]]]] = None,
+        return_time_stamps: bool = False,
+        top_k: int = 50,
+        max_hotwords: int = 30,
+    ) -> List["HotwordTranscription"]:
+        """
+        Hotword-enhanced transcription using external CTC-based retrieval.
+
+        For each audio sample:
+          1. Run CTCHotwordRetriever to get rough CTC text and retrieve hotwords.
+          2. Format hotwords as a context string.
+          3. Call transcribe_vanilla with the generated context.
+
+        Args:
+            audio: Audio input(s) -- same formats as transcribe_vanilla.
+            hotword_retriever: A CTCHotwordRetriever instance (with hotwords loaded).
+            language: Optional forced language(s).
+            return_time_stamps: Whether to produce timestamps.
+            top_k: PhonemeCorrector candidate count.
+            max_hotwords: Max hotwords to inject.
+
+        Returns:
+            List[HotwordTranscription]: One result per audio, including retrieval metadata.
+        """
+        if not isinstance(audio, list):
+            audio_list = [audio]
+        else:
+            audio_list = audio
+
+        n = len(audio_list)
+
+        contexts: List[str] = []
+        retrieval_results = []
+
+        for a in audio_list:
+            rr = hotword_retriever.retrieve(a, top_k=top_k, max_hotwords=max_hotwords)
+            retrieval_results.append(rr)
+            contexts.append(rr.context_string)
+
+        vanilla_results = self.transcribe_vanilla(
+            audio=audio_list,
+            context=contexts,
+            language=language,
+            return_time_stamps=return_time_stamps,
+        )
+
+        hotword_results: List[HotwordTranscription] = []
+        for vr, rr in zip(vanilla_results, retrieval_results):
+            hotword_results.append(HotwordTranscription(
+                language=vr.language,
+                text=vr.text,
+                time_stamps=vr.time_stamps,
+                ctc_text=rr.ctc_text,
+                retrieved_hotwords=rr.retrieved_hotwords,
+                hotword_scores=rr.hotword_scores,
+                context_used=rr.context_string,
+                retrieval_details=rr.details,
+            ))
+
+        return hotword_results
+
+    @torch.no_grad()
+    def transcribe_vanilla(
+        self,
+        audio: Union[AudioLike, List[AudioLike]],
+        context: Union[str, List[str]] = "",
+        language: Optional[Union[str, List[Optional[str]]]] = None,
+        return_time_stamps: bool = False,
     ) -> List[ASRTranscription]:
         """
-        Transcribe audio with optional context and optional forced alignment timestamps.
+        Original transcription logic (no RAG hotword retrieval).
 
         Args:
             audio:
