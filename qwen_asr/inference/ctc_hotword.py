@@ -91,7 +91,20 @@ class CTCHotwordRetriever:
             disable_update=True,
         )
         if nano_remote_code is not None:
-            load_kwargs["remote_code"] = nano_remote_code
+            abs_remote_code = os.path.abspath(nano_remote_code)
+            load_kwargs["remote_code"] = abs_remote_code
+            load_kwargs["trust_remote_code"] = True
+            # Workaround: funasr's import_module_from_path uses
+            #   importlib.import_module("model")
+            # which is fragile — it can resolve to a WRONG model.py if another
+            # package (e.g. nagisa) has injected its own directory into sys.path.
+            # Fix: clear the stale sys.modules cache AND prepend the correct
+            # directory so it is found first during the path search.
+            module_name = os.path.splitext(os.path.basename(abs_remote_code))[0]
+            sys.modules.pop(module_name, None)
+            remote_dir = os.path.dirname(abs_remote_code)
+            if remote_dir not in sys.path:
+                sys.path.insert(0, remote_dir)
 
         logger.info(f"Loading Fun-ASR-Nano CTC model: {nano_model}")
         wrapper = FunASRAutoModel(**load_kwargs)
