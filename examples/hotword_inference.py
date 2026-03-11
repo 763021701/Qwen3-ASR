@@ -142,14 +142,25 @@ def main():
         n_loaded = retriever.load_hotwords(args.hotwords)
         print(f"  CTC retriever loaded in {time.time() - t0:.1f}s ({n_loaded} hotwords)")
 
-        print_separator("Step 3: Running CTC decode + hotword retrieval")
-        t0 = time.time()
-        rr = retriever.retrieve(args.audio, top_k=args.top_k, max_hotwords=args.max_hotwords)
-        ctc_time = time.time() - t0
+        print_separator("Step 3: CTC encode + decode + hotword retrieval")
 
-        print(f"  CTC text:       {rr.ctc_text}")
-        print(f"  CTC time:       {ctc_time:.2f}s")
-        print(f"  Retrieved:      {len(rr.retrieved_hotwords)} hotwords")
+        # 3a. CTC audio encoding + greedy decode
+        t_ctc_start = time.time()
+        ctc_text = retriever.ctc_decode(args.audio)
+        t_ctc_decode = time.time() - t_ctc_start
+
+        # 3b. Phoneme-based hotword retrieval (FastRAG + AccuRAG)
+        t_retrieve_start = time.time()
+        rr = retriever.retrieve(args.audio, top_k=args.top_k, max_hotwords=args.max_hotwords)
+        t_retrieve = time.time() - t_retrieve_start
+
+        t_hotword_total = t_ctc_decode + t_retrieve
+
+        print(f"  CTC text:           {rr.ctc_text}")
+        print(f"  CTC decode time:    {t_ctc_decode:.3f}s  (Nano encoder + CTC decoder)")
+        print(f"  Retrieval time:     {t_retrieve:.3f}s  (CTC decode + PhonemeCorrector)")
+        print(f"  Hotword total:      {t_hotword_total:.3f}s")
+        print(f"  Retrieved:          {len(rr.retrieved_hotwords)} hotwords")
 
         if rr.retrieved_hotwords:
             print()
@@ -165,23 +176,37 @@ def main():
 
         print(f"\n  Context string:  \"{rr.context_string}\"")
 
+        # Step 4: Pure Qwen3-ASR inference (use context from Step 3 directly,
+        #         avoid redundant CTC retrieval inside transcribe_hotword)
         print_separator("Step 4: Running Qwen3-ASR with hotword context")
-        t0 = time.time()
-        results = asr.transcribe(
+        t_asr_start = time.time()
+        results = asr.transcribe_vanilla(
             audio=args.audio,
-            hotword_retriever=retriever,
+            context=rr.context_string,
             language=args.language,
             return_time_stamps=False,
-            top_k=args.top_k,
-            max_hotwords=args.max_hotwords,
         )
-        asr_time = time.time() - t0
+        t_asr = time.time() - t_asr_start
 
         r = results[0]
         print(f"  Language:        {r.language}")
         print(f"  Text:            {r.text}")
-        print(f"  ASR time:        {asr_time:.2f}s")
-        print(f"  Context used:    \"{r.context_used}\"")
+        print(f"  Qwen3-ASR time:  {t_asr:.3f}s  (audio encoder + LLM generate)")
+        print(f"  Context used:    \"{rr.context_string}\"")
+
+        # --- Timing summary ---
+        t_e2e = t_hotword_total + t_asr
+        print_separator("Timing Summary")
+        print(f"  [CTC decode]       {t_ctc_decode:7.3f}s  |  Fun-ASR-Nano encoder + CTC greedy")
+        print(f"  [Hotword retrieve] {t_retrieve:7.3f}s  |  CTC decode (2nd) + PhonemeCorrector")
+        print(f"  [Qwen3-ASR]        {t_asr:7.3f}s  |  Audio encoder + LLM generate")
+        print(f"  {'─' * 50}")
+        print(f"  [End-to-end]       {t_e2e:7.3f}s  (serial)")
+        print()
+        overlap = min(t_ctc_decode + t_retrieve, t_asr)
+        t_parallel_est = max(t_ctc_decode + t_retrieve, t_asr) + min(0, 0)
+        print(f"  * If parallelized: ~{t_parallel_est:.3f}s  "
+              f"(save ~{t_e2e - t_parallel_est:.3f}s / {(t_e2e - t_parallel_est) / t_e2e * 100:.0f}%)")
 
     else:
         # --- Vanilla mode ---
