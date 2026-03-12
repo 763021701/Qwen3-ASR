@@ -327,6 +327,7 @@ class Qwen3ASRModel:
         top_k: int = 50,
         max_hotwords: int = 30,
         parallel: bool = False,
+        context_format: str = "space",
     ) -> List[Union[ASRTranscription, "HotwordTranscription"]]:
         """
         Unified transcription entry point.
@@ -363,6 +364,9 @@ class Qwen3ASRModel:
             parallel:
                 If True, overlap CTC retrieval with Qwen3-ASR audio encoding
                 (transformers backend, single audio only).
+            context_format:
+                Format for the hotword context string. Supported:
+                "space" (default), "comma", "structured", "nano_style".
 
         Returns:
             List of ASRTranscription (vanilla) or HotwordTranscription (hotword mode).
@@ -378,6 +382,7 @@ class Qwen3ASRModel:
                 top_k=top_k,
                 max_hotwords=max_hotwords,
                 parallel=parallel,
+                context_format=context_format,
             )
 
         return self.transcribe_vanilla(
@@ -397,6 +402,7 @@ class Qwen3ASRModel:
         top_k: int = 50,
         max_hotwords: int = 30,
         parallel: bool = False,
+        context_format: str = "space",
     ) -> List["HotwordTranscription"]:
         """
         Hotword-enhanced transcription using external CTC-based retrieval.
@@ -420,6 +426,8 @@ class Qwen3ASRModel:
             parallel: If True, overlap CTC retrieval with Qwen3-ASR audio
                       encoding.  Only supported for the transformers backend
                       with a single audio input.
+            context_format: Format for hotword context string
+                            ("space", "comma", "structured", "nano_style").
 
         Returns:
             List[HotwordTranscription]: One result per audio, including retrieval metadata.
@@ -442,6 +450,7 @@ class Qwen3ASRModel:
                 language=language[0] if isinstance(language, list) else language,
                 top_k=top_k,
                 max_hotwords=max_hotwords,
+                context_format=context_format,
             )
 
         # --- serial path (original logic) ----------------------------------
@@ -451,7 +460,10 @@ class Qwen3ASRModel:
         retrieval_results = []
 
         for a in audio_list:
-            rr = hotword_retriever.retrieve(a, top_k=top_k, max_hotwords=max_hotwords)
+            rr = hotword_retriever.retrieve(
+                a, top_k=top_k, max_hotwords=max_hotwords,
+                context_format=context_format,
+            )
             retrieval_results.append(rr)
             contexts.append(rr.context_string)
 
@@ -475,6 +487,9 @@ class Qwen3ASRModel:
                 retrieval_details=rr.details,
             ))
 
+        # Drop heavy intermediates (correction_result inside each rr)
+        del retrieval_results, vanilla_results
+
         return hotword_results
 
     @torch.no_grad()
@@ -485,6 +500,7 @@ class Qwen3ASRModel:
         language: Optional[str] = None,
         top_k: int = 50,
         max_hotwords: int = 30,
+        context_format: str = "space",
     ) -> List["HotwordTranscription"]:
         """
         Parallel hotword transcription for a single audio (transformers only).
@@ -511,24 +527,38 @@ class Qwen3ASRModel:
 
         use_cuda_streams = self.device is not None and self.device.type == "cuda"
 
+        # Reuse CUDA streams instead of creating new ones every call to avoid
+        # VRAM fragmentation and stream-context leaks.
+        if use_cuda_streams:
+            if not hasattr(self, "_parallel_streams") or self._parallel_streams is None:
+                self._parallel_streams = (
+                    torch.cuda.Stream(self.device),
+                    torch.cuda.Stream(self.device),
+                )
+            stream_ctc, stream_audio = self._parallel_streams
+        else:
+            stream_ctc = stream_audio = None  # unused
+
         # Wrappers that run tasks under separate CUDA streams so the two
         # GPU-bound workloads (Nano encoder vs AudioTower) can overlap.
         def _ctc_task():
             if use_cuda_streams:
-                with torch.cuda.stream(torch.cuda.Stream(self.device)):
+                with torch.cuda.stream(stream_ctc):
                     with torch.no_grad():
                         return hotword_retriever.retrieve(
                             audio, top_k=top_k, max_hotwords=max_hotwords,
+                            context_format=context_format,
                         )
             else:
                 with torch.no_grad():
                     return hotword_retriever.retrieve(
                         audio, top_k=top_k, max_hotwords=max_hotwords,
+                        context_format=context_format,
                     )
 
         def _audio_task():
             if use_cuda_streams:
-                with torch.cuda.stream(torch.cuda.Stream(self.device)):
+                with torch.cuda.stream(stream_audio):
                     with torch.no_grad():
                         return self._pre_encode_audio(wav)
             else:
@@ -556,13 +586,23 @@ class Qwen3ASRModel:
 
         # --- serial: LLM generation with pre-computed embeddings ---
         t_llm_start = _time.monotonic()
+        context_str = rr.context_string
         raw_text = self._generate_with_audio_embeds(
             pre_encoded=pre_encoded,
             wav=wav,
-            context=rr.context_string,
+            context=context_str,
             language=lang_norm,
         )
         t_llm = _time.monotonic() - t_llm_start
+
+        # Extract lightweight metadata before dropping heavy objects
+        ctc_text = rr.ctc_text
+        retrieved_hotwords = rr.retrieved_hotwords
+        hotword_scores = rr.hotword_scores
+        retrieval_details = rr.details
+
+        # Eagerly free GPU tensors held by pre_encoded (audio_features etc.)
+        del pre_encoded, rr
 
         lang_out, text_out = parse_asr_output(raw_text, user_language=lang_norm)
 
@@ -575,11 +615,11 @@ class Qwen3ASRModel:
             language=lang_out,
             text=text_out,
             time_stamps=None,
-            ctc_text=rr.ctc_text,
-            retrieved_hotwords=rr.retrieved_hotwords,
-            hotword_scores=rr.hotword_scores,
-            context_used=rr.context_string,
-            retrieval_details=rr.details,
+            ctc_text=ctc_text,
+            retrieved_hotwords=retrieved_hotwords,
+            hotword_scores=hotword_scores,
+            context_used=context_str,
+            retrieval_details=retrieval_details,
         )]
 
     @torch.no_grad()
@@ -795,12 +835,17 @@ class Qwen3ASRModel:
 
             text_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
 
+            # Slice generated tokens before deleting inputs
+            input_len = inputs["input_ids"].shape[1]
             decoded = self.processor.batch_decode(
-                text_ids.sequences[:, inputs["input_ids"].shape[1]:],
+                text_ids.sequences[:, input_len:],
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )
             outs.extend(list(decoded))
+
+            # Eagerly free GPU tensors to avoid accumulation across batches
+            del inputs, text_ids
 
         return outs
 
@@ -939,11 +984,21 @@ class Qwen3ASRModel:
             return_dict_in_generate=True,
         )
 
+        # Extract sequences immediately and drop gen_out which may hold
+        # the full KV cache (past_key_values) consuming significant VRAM.
+        output_sequences = gen_out.sequences[:, input_ids.shape[1]:]
+        del gen_out
+
         decoded = self.processor.batch_decode(
-            gen_out.sequences[:, input_ids.shape[1]:],
+            output_sequences,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )
+
+        # Free intermediate GPU tensors
+        del input_ids, attention_mask, inputs_embeds, audio_features
+        del audio_mask, audio_mask_3d, output_sequences
+
         return decoded[0]
 
     def _offset_align_result(self, result: Any, offset_sec: float) -> Any:

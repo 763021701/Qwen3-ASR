@@ -270,6 +270,10 @@ class CTCHotwordRetriever:
         yseq = torch.unique_consecutive(yseq, dim=-1)
         ctc_text = self.ctc_tokenizer.decode(yseq[yseq != self.blank_id].tolist())
 
+        # Eagerly free all GPU tensors to prevent VRAM accumulation
+        del speech, speech_lengths, encoder_out, encoder_out_lens
+        del decoder_out, ctc_logits, x, yseq
+
         return ctc_text
 
     def retrieve(
@@ -277,6 +281,7 @@ class CTCHotwordRetriever:
         audio: Union[str, np.ndarray, Tuple],
         top_k: int = 50,
         max_hotwords: int = 30,
+        context_format: str = "space",
     ) -> HotwordRetrievalResult:
         """
         Run full CTC -> PhonemeCorrector pipeline to retrieve hotwords.
@@ -285,6 +290,8 @@ class CTCHotwordRetriever:
             audio: Audio input (file path / numpy array / (ndarray, sr) tuple).
             top_k: Number of candidates for PhonemeCorrector.
             max_hotwords: Maximum number of hotwords to return.
+            context_format: Format for the context string
+                            ("space", "comma", "structured", "nano_style").
 
         Returns:
             HotwordRetrievalResult with ctc_text, retrieved hotwords, and context string.
@@ -313,7 +320,7 @@ class CTCHotwordRetriever:
         retrieved = [hw for hw, _ in ranked[:max_hotwords]]
         scores = {hw: sc for hw, sc in ranked[:max_hotwords]}
 
-        context_str = self.format_context(retrieved)
+        context_str = self.format_context(retrieved, fmt=context_format)
 
         return HotwordRetrievalResult(
             ctc_text=ctc_text,
@@ -325,6 +332,44 @@ class CTCHotwordRetriever:
         )
 
     @staticmethod
-    def format_context(hotwords: List[str]) -> str:
-        """Format hotwords as space-separated string for Qwen3-ASR context."""
-        return " ".join(hotwords)
+    def format_context(hotwords: List[str], fmt: str = "space") -> str:
+        """
+        Format hotwords as a context string for Qwen3-ASR system message.
+
+        Supported formats:
+            "space"      – (default, official Qwen3-ASR style)
+                           "热词1 热词2 热词3"
+            "comma"      – Comma-separated
+                           "热词1, 热词2, 热词3"
+            "structured" – Structured Chinese instruction
+                           "请结合以下热词进行语音转写。\\n热词列表：[热词1, 热词2, 热词3]"
+            "nano_style" – Fun-ASR-Nano style (adapted for system message)
+                           "请结合上下文信息，更加准确地完成语音转写任务。...热词列表：[...]"
+
+        Args:
+            hotwords: List of hotword strings.
+            fmt: Format name (default: "space").
+
+        Returns:
+            Formatted context string.
+        """
+        if not hotwords:
+            return ""
+
+        if fmt == "space":
+            return " ".join(hotwords)
+        elif fmt == "comma":
+            return ", ".join(hotwords)
+        elif fmt == "structured":
+            hw_str = ", ".join(hotwords)
+            return f"请结合以下热词进行语音转写。\n热词列表：[{hw_str}]"
+        elif fmt == "nano_style":
+            hw_str = ", ".join(hotwords)
+            return (
+                "请结合上下文信息，更加准确地完成语音转写任务。"
+                "如果没有相关信息，我们会留空。\n\n"
+                f"**上下文信息：**\n\n热词列表：[{hw_str}]"
+            )
+        else:
+            logger.warning(f"Unknown context_format '{fmt}', falling back to 'space'")
+            return " ".join(hotwords)
