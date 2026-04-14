@@ -51,6 +51,7 @@ SUPPORTED_LANGUAGES: List[str] = [
     "Vietnamese",
     "Japanese",
     "Turkish",
+    "Uyghur",
     "Hindi",
     "Malay",
     "Dutch",

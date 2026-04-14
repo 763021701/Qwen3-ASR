@@ -164,24 +164,33 @@ class CastFloatInputsTrainer(Trainer):
         return inputs
 
 
-def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
+def copy_required_hf_files_for_qwen_asr(src_ref: str, dst_dir: str):
+    """Copy files Trainer.save_model does not write, so checkpoints stay AutoProcessor-loadable."""
     os.makedirs(dst_dir, exist_ok=True)
+    # Do not copy tokenizer/config from base: Trainer already saves those and hub id is not a path.
     required = [
-        "config.json",
-        "generation_config.json",
         "preprocessor_config.json",
         "processor_config.json",
-        "tokenizer_config.json",
-        "tokenizer.json",
-        "special_tokens_map.json",
         "chat_template.json",
-        "merges.txt",
-        "vocab.json",
     ]
+    if os.path.isdir(src_ref):
+        for fn in required:
+            src = os.path.join(src_ref, fn)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(dst_dir, fn))
+        return
+
+    # Hub repo id (e.g. Qwen/Qwen3-ASR-1.7B): os.path.join would not resolve to real files.
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return
     for fn in required:
-        src = os.path.join(src_dir, fn)
-        if os.path.exists(src):
-            shutil.copy2(src, os.path.join(dst_dir, fn))
+        try:
+            cached = hf_hub_download(repo_id=src_ref, filename=fn)
+            shutil.copy2(cached, os.path.join(dst_dir, fn))
+        except Exception:
+            pass
 
 
 class MakeEveryCheckpointInferableCallback(TrainerCallback):
