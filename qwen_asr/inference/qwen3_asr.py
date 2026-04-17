@@ -79,15 +79,16 @@ class ASRTranscription:
 @dataclass
 class HotwordTranscription:
     """
-    Transcription result with RAG hotword retrieval metadata.
-
-    Extends ASRTranscription fields with CTC and hotword information.
+    Transcription result with CTC-RAG hotword retrieval metadata.
     """
     language: str
     text: str
     time_stamps: Optional[Any] = None
-    ctc_text: str = ""
+    greedy_text: str = ""
+    integrated_text: str = ""
     retrieved_hotwords: List[str] = field(default_factory=list)
+    radar_hotwords: List[str] = field(default_factory=list)
+    extra_hotwords: List[str] = field(default_factory=list)
     hotword_scores: Dict[str, float] = field(default_factory=dict)
     context_used: str = ""
     retrieval_details: Optional[Any] = None
@@ -315,6 +316,63 @@ class Qwen3ASRModel:
         """
         return list(SUPPORTED_LANGUAGES)
 
+    @staticmethod
+    def format_hotword_context(hotwords: List[str], fmt: str = "space") -> str:
+        """
+        Format retrieved hotwords into a context string for Qwen3-ASR.
+
+        Supported formats:
+            "space"      -> "hotword1 hotword2 hotword3"
+            "comma"      -> "hotword1, hotword2, hotword3"
+            "structured" -> "Please transcribe with the following hotwords..."
+            "nano_style" -> Fun-ASR-Nano style structured context
+        """
+        if not hotwords:
+            return ""
+
+        if fmt == "space":
+            return " ".join(hotwords)
+        if fmt == "comma":
+            return ", ".join(hotwords)
+        if fmt == "structured":
+            hw_str = ", ".join(hotwords)
+            return f"请结合以下热词进行语音转写。\n热词列表：[{hw_str}]"
+        if fmt == "nano_style":
+            hw_str = ", ".join(hotwords)
+            return (
+                "请结合上下文信息，更加准确地完成语音转写任务。"
+                "如果没有相关信息，我们会留空。\n\n"
+                f"**上下文信息：**\n\n热词列表：[{hw_str}]"
+            )
+
+        logging.getLogger(__name__).warning(
+            "Unknown context_format '%s', falling back to 'space'",
+            fmt,
+        )
+        return " ".join(hotwords)
+
+    @staticmethod
+    def _build_hotword_transcription(
+        language: str,
+        text: str,
+        time_stamps: Optional[Any],
+        rag_result: Any,
+        context_used: str,
+    ) -> "HotwordTranscription":
+        return HotwordTranscription(
+            language=language,
+            text=text,
+            time_stamps=time_stamps,
+            greedy_text=getattr(rag_result, "greedy_text", ""),
+            integrated_text=getattr(rag_result, "integrated_text", ""),
+            retrieved_hotwords=list(getattr(rag_result, "retrieved_hotwords", [])),
+            radar_hotwords=list(getattr(rag_result, "radar_hotwords", [])),
+            extra_hotwords=list(getattr(rag_result, "extra_hotwords", [])),
+            hotword_scores=dict(getattr(rag_result, "hotword_scores", {})),
+            context_used=context_used,
+            retrieval_details=getattr(rag_result, "details", None),
+        )
+
     @torch.no_grad()
     def transcribe(
         self,
@@ -322,9 +380,9 @@ class Qwen3ASRModel:
         context: Union[str, List[str]] = "",
         language: Optional[Union[str, List[Optional[str]]]] = None,
         return_time_stamps: bool = False,
-        hotword_retriever: Optional[Any] = None,
+        rag_retriever: Optional[Any] = None,
         hotwords: Optional[Union[str, List[str]]] = None,
-        top_k: int = 50,
+        ctc_topk: int = 30,
         max_hotwords: int = 30,
         parallel: bool = False,
         context_format: str = "space",
@@ -332,9 +390,10 @@ class Qwen3ASRModel:
         """
         Unified transcription entry point.
 
-        When ``hotword_retriever`` is provided (a :class:`CTCHotwordRetriever`),
-        hotword-enhanced transcription is used: CTC rough decode -> phoneme
-        retrieval -> inject hotwords as context -> Qwen3-ASR final decode.
+        When ``rag_retriever`` is provided (for example a
+        :class:`ctc_rag_hw.CTCRagRetriever`), hotword-enhanced transcription is
+        used: CTC-RAG retrieval -> inject retrieved hotwords as context ->
+        Qwen3-ASR final decode.
 
         Otherwise falls through to the vanilla (original) transcription path.
 
@@ -350,15 +409,15 @@ class Qwen3ASRModel:
                 Optional language(s). If provided, it must be in supported languages.
             return_time_stamps:
                 If True, timestamps are produced via forced aligner.
-            hotword_retriever:
-                Optional CTCHotwordRetriever instance. When set, enables RAG
+            rag_retriever:
+                Optional CTCRagRetriever-like instance. When set, enables RAG
                 hotword mode and ``context`` is ignored (replaced by retrieved
                 hotwords).
             hotwords:
                 Optional hotword source (file path or list of strings).
-                Auto-loaded into ``hotword_retriever`` if provided.
-            top_k:
-                Number of PhonemeCorrector candidates (hotword mode only).
+                Auto-loaded into ``rag_retriever`` if provided.
+            ctc_topk:
+                Number of CTC candidate tokens used by the CTC-RAG retriever.
             max_hotwords:
                 Maximum hotwords injected into context (hotword mode only).
             parallel:
@@ -371,15 +430,15 @@ class Qwen3ASRModel:
         Returns:
             List of ASRTranscription (vanilla) or HotwordTranscription (hotword mode).
         """
-        if hotword_retriever is not None:
+        if rag_retriever is not None:
             if hotwords is not None:
-                hotword_retriever.load_hotwords(hotwords)
+                rag_retriever.load_hotwords(hotwords)
             return self.transcribe_hotword(
                 audio=audio,
-                hotword_retriever=hotword_retriever,
+                rag_retriever=rag_retriever,
                 language=language,
                 return_time_stamps=return_time_stamps,
-                top_k=top_k,
+                ctc_topk=ctc_topk,
                 max_hotwords=max_hotwords,
                 parallel=parallel,
                 context_format=context_format,
@@ -396,19 +455,19 @@ class Qwen3ASRModel:
     def transcribe_hotword(
         self,
         audio: Union[AudioLike, List[AudioLike]],
-        hotword_retriever: Any,
+        rag_retriever: Any,
         language: Optional[Union[str, List[Optional[str]]]] = None,
         return_time_stamps: bool = False,
-        top_k: int = 50,
+        ctc_topk: int = 30,
         max_hotwords: int = 30,
         parallel: bool = False,
         context_format: str = "space",
     ) -> List["HotwordTranscription"]:
         """
-        Hotword-enhanced transcription using external CTC-based retrieval.
+        Hotword-enhanced transcription using external CTC-RAG retrieval.
 
         For each audio sample:
-          1. Run CTCHotwordRetriever to get rough CTC text and retrieve hotwords.
+          1. Run CTCRagRetriever to obtain retrieved hotwords.
           2. Format hotwords as a context string.
           3. Call Qwen3-ASR with the generated context.
 
@@ -418,10 +477,10 @@ class Qwen3ASRModel:
 
         Args:
             audio: Audio input(s) -- same formats as transcribe_vanilla.
-            hotword_retriever: A CTCHotwordRetriever instance (with hotwords loaded).
+            rag_retriever: A CTCRagRetriever-like instance (with hotwords loaded).
             language: Optional forced language(s).
             return_time_stamps: Whether to produce timestamps.
-            top_k: PhonemeCorrector candidate count.
+            ctc_topk: Number of CTC candidate tokens used by the CTC-RAG retriever.
             max_hotwords: Max hotwords to inject.
             parallel: If True, overlap CTC retrieval with Qwen3-ASR audio
                       encoding.  Only supported for the transformers backend
@@ -446,26 +505,29 @@ class Qwen3ASRModel:
         ):
             return self._transcribe_hotword_parallel(
                 audio_list[0],
-                hotword_retriever=hotword_retriever,
+                rag_retriever=rag_retriever,
                 language=language[0] if isinstance(language, list) else language,
-                top_k=top_k,
+                ctc_topk=ctc_topk,
                 max_hotwords=max_hotwords,
                 context_format=context_format,
             )
 
         # --- serial path (original logic) ----------------------------------
-        n = len(audio_list)
-
         contexts: List[str] = []
         retrieval_results = []
 
         for a in audio_list:
-            rr = hotword_retriever.retrieve(
-                a, top_k=top_k, max_hotwords=max_hotwords,
-                context_format=context_format,
+            rr = rag_retriever.retrieve(
+                a,
+                ctc_topk=ctc_topk,
+                max_hotwords=max_hotwords,
+            )
+            context_str = self.format_hotword_context(
+                rr.retrieved_hotwords,
+                fmt=context_format,
             )
             retrieval_results.append(rr)
-            contexts.append(rr.context_string)
+            contexts.append(context_str)
 
         vanilla_results = self.transcribe_vanilla(
             audio=audio_list,
@@ -475,16 +537,13 @@ class Qwen3ASRModel:
         )
 
         hotword_results: List[HotwordTranscription] = []
-        for vr, rr in zip(vanilla_results, retrieval_results):
-            hotword_results.append(HotwordTranscription(
+        for vr, rr, context_str in zip(vanilla_results, retrieval_results, contexts):
+            hotword_results.append(self._build_hotword_transcription(
                 language=vr.language,
                 text=vr.text,
                 time_stamps=vr.time_stamps,
-                ctc_text=rr.ctc_text,
-                retrieved_hotwords=rr.retrieved_hotwords,
-                hotword_scores=rr.hotword_scores,
-                context_used=rr.context_string,
-                retrieval_details=rr.details,
+                rag_result=rr,
+                context_used=context_str,
             ))
 
         # Drop heavy intermediates (correction_result inside each rr)
@@ -496,21 +555,21 @@ class Qwen3ASRModel:
     def _transcribe_hotword_parallel(
         self,
         audio: AudioLike,
-        hotword_retriever: Any,
+        rag_retriever: Any,
         language: Optional[str] = None,
-        top_k: int = 50,
+        ctc_topk: int = 30,
         max_hotwords: int = 30,
         context_format: str = "space",
     ) -> List["HotwordTranscription"]:
         """
         Parallel hotword transcription for a single audio (transformers only).
 
-        Overlaps CTC-based hotword retrieval with Qwen3-ASR audio encoding
+        Overlaps CTC-RAG retrieval with Qwen3-ASR audio encoding
         using two threads, then runs LLM generation serially.
 
         Timeline::
 
-            Thread-A: [Nano encoder + CTC] -> [PhonemeCorrector (CPU)]──┐
+            Thread-A: [Nano encoder + CTC-RAG retrieve]───────────────┐
             Thread-B: [mel (CPU)] -> [AudioTower (GPU)]                 ├→ LLM generate
                                                                         ┘
         """
@@ -545,15 +604,17 @@ class Qwen3ASRModel:
             if use_cuda_streams:
                 with torch.cuda.stream(stream_ctc):
                     with torch.no_grad():
-                        return hotword_retriever.retrieve(
-                            audio, top_k=top_k, max_hotwords=max_hotwords,
-                            context_format=context_format,
+                        return rag_retriever.retrieve(
+                            audio,
+                            ctc_topk=ctc_topk,
+                            max_hotwords=max_hotwords,
                         )
             else:
                 with torch.no_grad():
-                    return hotword_retriever.retrieve(
-                        audio, top_k=top_k, max_hotwords=max_hotwords,
-                        context_format=context_format,
+                    return rag_retriever.retrieve(
+                        audio,
+                        ctc_topk=ctc_topk,
+                        max_hotwords=max_hotwords,
                     )
 
         def _audio_task():
@@ -569,7 +630,7 @@ class Qwen3ASRModel:
         with ThreadPoolExecutor(max_workers=2) as pool:
             t_start = _time.monotonic()
 
-            # Thread A: CTC encode + decode + PhonemeCorrector
+            # Thread A: CTC-RAG retrieval
             future_ctc = pool.submit(_ctc_task)
 
             # Thread B: Qwen3-ASR mel extraction + audio_tower
@@ -586,7 +647,10 @@ class Qwen3ASRModel:
 
         # --- serial: LLM generation with pre-computed embeddings ---
         t_llm_start = _time.monotonic()
-        context_str = rr.context_string
+        context_str = self.format_hotword_context(
+            rr.retrieved_hotwords,
+            fmt=context_format,
+        )
         raw_text = self._generate_with_audio_embeds(
             pre_encoded=pre_encoded,
             wav=wav,
@@ -596,10 +660,13 @@ class Qwen3ASRModel:
         t_llm = _time.monotonic() - t_llm_start
 
         # Extract lightweight metadata before dropping heavy objects
-        ctc_text = rr.ctc_text
-        retrieved_hotwords = rr.retrieved_hotwords
-        hotword_scores = rr.hotword_scores
-        retrieval_details = rr.details
+        hotword_result = self._build_hotword_transcription(
+            language="",
+            text="",
+            time_stamps=None,
+            rag_result=rr,
+            context_used=context_str,
+        )
 
         # Eagerly free GPU tensors held by pre_encoded (audio_features etc.)
         del pre_encoded, rr
@@ -615,11 +682,14 @@ class Qwen3ASRModel:
             language=lang_out,
             text=text_out,
             time_stamps=None,
-            ctc_text=ctc_text,
-            retrieved_hotwords=retrieved_hotwords,
-            hotword_scores=hotword_scores,
-            context_used=context_str,
-            retrieval_details=retrieval_details,
+            greedy_text=hotword_result.greedy_text,
+            integrated_text=hotword_result.integrated_text,
+            retrieved_hotwords=hotword_result.retrieved_hotwords,
+            radar_hotwords=hotword_result.radar_hotwords,
+            extra_hotwords=hotword_result.extra_hotwords,
+            hotword_scores=hotword_result.hotword_scores,
+            context_used=hotword_result.context_used,
+            retrieval_details=hotword_result.retrieval_details,
         )]
 
     @torch.no_grad()

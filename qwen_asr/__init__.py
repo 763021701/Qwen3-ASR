@@ -19,7 +19,7 @@ qwen_asr: Qwen3-ASR package.
 
 from .inference.qwen3_asr import Qwen3ASRModel, HotwordTranscription
 from .inference.qwen3_forced_aligner import Qwen3ForcedAligner
-from .inference.ctc_hotword import CTCHotwordRetriever, HotwordRetrievalResult
+from ctc_rag_hw import CTCRagRetriever, CTCRagResult
 
 from .inference.utils import parse_asr_output
 
@@ -28,7 +28,7 @@ __all__ = [
     "Qwen3ASRModel",
     "HotwordTranscription",
     "Qwen3ForcedAligner",
-    "CTCHotwordRetriever",
-    "HotwordRetrievalResult",
+    "CTCRagRetriever",
+    "CTCRagResult",
     "parse_asr_output",
 ]
