@@ -16,12 +16,13 @@ Dependencies:
   - librosa (for MP3 / formats fairseq2 AudioDecoder does not support; same as Qwen stack)
 
 Example:
-  python baselines/eval_uyghur_asr_omnilingual_jsonl.py \\
-    --jsonl data/ug_dev_qwen3.jsonl \\
-    --model_card omniASR_LLM_7B_v2 \\
-    --omnilingual_lang uig_Arab \\
-    --max_samples 500 \\
-    --batch_size 4
+  python baselines/eval_uyghur_asr_omnilingual_jsonl.py \
+    --jsonl data/ug_test_qwen3.jsonl \
+    --model_card omniASR_LLM_1B_v2 \
+    --omnilingual_lang uig_Arab \
+    --max_samples 2000 \
+    --batch_size 4 \
+    --output_predictions outputs/omniASR_LLM_1B_v2/predictions.jsonl
 """
 
 from __future__ import annotations

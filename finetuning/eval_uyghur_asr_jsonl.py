@@ -12,11 +12,12 @@ Without jiwer, a small Levenshtein fallback is used (same corpus-level definitio
 
 Example:
   python finetuning/eval_uyghur_asr_jsonl.py \
-    --jsonl data/ug_dev_qwen3.jsonl \
-    --model outputs/qwen3_asr_sft_ug/checkpoint-7200 \
+    --jsonl data/ug_test_qwen3.jsonl \
+    --model /root/autodl-tmp/hf_cache/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5 \
     --language Uyghur \
-    --max_samples 500 \
-    --batch_size 4
+    --max_samples 2000 \
+    --batch_size 8 \
+    --output_predictions outputs/qwen3_asr/predictions.jsonl
 """
 
 from __future__ import annotations
