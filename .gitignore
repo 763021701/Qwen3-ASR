@@ -24,3 +24,6 @@ venv/
 env/
 data/
 outputs/
+outputs
+bakup/
+

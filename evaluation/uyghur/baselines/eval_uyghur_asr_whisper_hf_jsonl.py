@@ -2,7 +2,7 @@
 # coding=utf-8
 """
 Evaluate a HuggingFace Whisper checkpoint on a Qwen3-style jsonl manifest (same protocol as
-finetuning/eval_uyghur_asr_jsonl.py): NFC normalization, ZWSP stripped, whitespace collapsed,
+evaluation/uyghur/eval_uyghur_asr_jsonl.py): NFC normalization, ZWSP stripped, whitespace collapsed,
 corpus-level WER/CER via jiwer (or built-in Levenshtein).
 
 Default model: ixxan/whisper-small-uyghur-common-voice
@@ -17,8 +17,8 @@ Batched eval uses return_attention_mask=True so padded mels are masked (required
 Dependencies: transformers, torch, librosa; optional jiwer (recommended).
 
 Example:
-  python baselines/eval_uyghur_asr_whisper_hf_jsonl.py \\
-    --jsonl data/ug_test_qwen3.jsonl \\
+  python evaluation/uyghur/baselines/eval_uyghur_asr_whisper_hf_jsonl.py \\
+    --jsonl data/uyghur/common_voice/ug_test_qwen3.jsonl \\
     --model ixxan/whisper-small-uyghur-common-voice \\
     --batch_size 8 \\
     --max_samples 500
@@ -347,7 +347,7 @@ def main() -> None:
     print(f"WER:         {wer * 100:.2f}%")
     print(f"CER:         {cer * 100:.2f}%")
     print("")
-    print("Note: Same normalization and WER/CER definition as finetuning/eval_uyghur_asr_jsonl.py.")
+    print("Note: Same normalization and WER/CER definition as evaluation/uyghur/eval_uyghur_asr_jsonl.py.")
 
     if args.output_predictions:
         out_path = args.output_predictions

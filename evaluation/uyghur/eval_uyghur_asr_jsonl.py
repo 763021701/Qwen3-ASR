@@ -10,9 +10,14 @@ For Uyghur (Arabic script, space-separated orthography in Common Voice):
 Install (recommended): pip install jiwer
 Without jiwer, a small Levenshtein fallback is used (same corpus-level definition).
 
+If reference and hypothesis use different Uyghur scripts (Arabic vs Latin), optionally align the
+hypothesis with umsc before scoring (default: enabled when umsc is installed):
+  pip install umsc
+  # disable: add --no_umsc_script_align
+
 Example:
-  python finetuning/eval_uyghur_asr_jsonl.py \
-    --jsonl data/ug_test_qwen3.jsonl \
+  python evaluation/uyghur/eval_uyghur_asr_jsonl.py \
+    --jsonl data/uyghur/common_voice/ug_test_qwen3.jsonl \
     --model /root/autodl-tmp/hf_cache/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5 \
     --language Uyghur \
     --max_samples 2000 \
@@ -58,6 +63,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="If set, write jsonl with ref/hyp/errors per line.",
     )
+    p.add_argument(
+        "--no_umsc_script_align",
+        action="store_true",
+        help="Do not convert hypothesis UAS/ULS via umsc to match reference script before scoring.",
+    )
     p.add_argument("--device_map", type=str, default="cuda:0", help="Transformers device_map.")
     return p.parse_args()
 
@@ -73,6 +83,72 @@ def extract_reference_text(label: str) -> str:
 
 
 _ZW_RE = re.compile(r"[\u200c\u200d\ufeff]")
+_LETTER_CATS = frozenset({"Lu", "Ll", "Lt", "Lm"})
+
+
+def _is_arabic_script_char(ch: str) -> bool:
+    """Heuristic: Arabic block / presentation forms used for Uyghur Arabic orthography."""
+    o = ord(ch)
+    if o == 0x0640:  # tatweel
+        return False
+    return (
+        0x0600 <= o <= 0x06FF
+        or 0x0750 <= o <= 0x077F
+        or 0x08A0 <= o <= 0x08FF
+        or 0xFB50 <= o <= 0xFDFF
+        or 0xFE70 <= o <= 0xFEFF
+    )
+
+
+def _is_latin_letter_char(ch: str) -> bool:
+    if _is_arabic_script_char(ch):
+        return False
+    return unicodedata.category(ch) in _LETTER_CATS
+
+
+def count_arabic_latin_letters(s: str) -> Tuple[int, int]:
+    """Count Arabic-script vs Latin letters (digits/punct ignored)."""
+    a = l = 0
+    for ch in s or "":
+        if _is_arabic_script_char(ch):
+            a += 1
+        elif _is_latin_letter_char(ch):
+            l += 1
+    return a, l
+
+
+def dominant_script_kind(arabic: int, latin: int) -> str:
+    """Return 'arabic', 'latin', or 'unknown' for script-alignment decisions."""
+    if arabic == 0 and latin == 0:
+        return "unknown"
+    if arabic > latin:
+        return "arabic"
+    if latin > arabic:
+        return "latin"
+    return "unknown"
+
+
+def align_hypothesis_script_to_reference(
+    hyp: str,
+    ref: str,
+    conv_uls_to_uas: Any,
+    conv_uas_to_uls: Any,
+) -> Tuple[str, str]:
+    """
+    If ref is Arabic and hyp is Latin -> convert hyp with ULS->UAS.
+    If ref is Latin and hyp is Arabic -> convert hyp with UAS->ULS.
+    Returns (possibly_converted_hyp, umsc_action) where umsc_action is
+    'ULS_to_UAS', 'UAS_to_ULS', or 'none'.
+    """
+    ra, rl = count_arabic_latin_letters(ref)
+    ha, hl = count_arabic_latin_letters(hyp)
+    rk = dominant_script_kind(ra, rl)
+    hk = dominant_script_kind(ha, hl)
+    if rk == "arabic" and hk == "latin":
+        return conv_uls_to_uas(hyp), "ULS_to_UAS"
+    if rk == "latin" and hk == "arabic":
+        return conv_uas_to_uls(hyp), "UAS_to_ULS"
+    return hyp, "none"
 
 
 def normalize_for_scoring(s: str) -> str:
@@ -198,8 +274,36 @@ def main() -> None:
         print("Internal error: prediction count mismatch.", file=sys.stderr)
         sys.exit(1)
 
+    umsc_align = not args.no_umsc_script_align
+    conv_uls_to_uas: Any = None
+    conv_uas_to_uls: Any = None
+    if umsc_align:
+        try:
+            from umsc import UgMultiScriptConverter
+
+            conv_uls_to_uas = UgMultiScriptConverter("ULS", "UAS")
+            conv_uas_to_uls = UgMultiScriptConverter("UAS", "ULS")
+        except ImportError:
+            print("umsc not installed; scoring without UAS/ULS hypothesis alignment.", file=sys.stderr)
+            print("  Install: pip install umsc   (or pass --no_umsc_script_align to silence)", file=sys.stderr)
+            umsc_align = False
+
+    hyps_raw_for_score: List[str] = []
+    umsc_actions: List[str] = []
+    umsc_counts = {"none": 0, "ULS_to_UAS": 0, "UAS_to_ULS": 0}
+    if umsc_align and conv_uls_to_uas is not None and conv_uas_to_uls is not None:
+        for pr, rr in zip(predictions, refs_raw):
+            h2, action = align_hypothesis_script_to_reference(pr, rr, conv_uls_to_uas, conv_uas_to_uls)
+            hyps_raw_for_score.append(h2)
+            umsc_actions.append(action)
+            umsc_counts[action] = umsc_counts.get(action, 0) + 1
+    else:
+        hyps_raw_for_score = list(predictions)
+        umsc_actions = ["none"] * len(predictions)
+        umsc_counts = {"none": len(predictions), "ULS_to_UAS": 0, "UAS_to_ULS": 0}
+
     refs = [normalize_for_scoring(r) for r in refs_raw]
-    hyps = [normalize_for_scoring(h) for h in predictions]
+    hyps = [normalize_for_scoring(h) for h in hyps_raw_for_score]
 
     try:
         wer, cer = corpus_wer_cer_jiwer(refs, hyps)
@@ -212,6 +316,14 @@ def main() -> None:
     print("=== Uyghur ASR metrics ===")
     print(f"Samples:     {len(rows)}")
     print(f"Scoring:     NFC, ZWSP removed, whitespace collapsed")
+    if umsc_align:
+        print(
+            "umsc align:  hypothesis converted to reference script when ref/hyp disagree "
+            f"(ULS->UAS={umsc_counts.get('ULS_to_UAS', 0)}, UAS->ULS={umsc_counts.get('UAS_to_ULS', 0)}, "
+            f"unchanged={umsc_counts.get('none', 0)})"
+        )
+    else:
+        print("umsc align:  off")
     print(f"Backend:     {backend}")
     print(f"WER:         {wer * 100:.2f}%")
     print(f"CER:         {cer * 100:.2f}%")
@@ -225,7 +337,9 @@ def main() -> None:
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as wf:
-            for ex, rr, hh, pr in zip(rows, refs, hyps, predictions):
+            for ex, rr, hh, pr, h_raw_sc, act in zip(
+                rows, refs, hyps, predictions, hyps_raw_for_score, umsc_actions
+            ):
                 rw, hw = rr.split(), hh.split()
                 if len(rw) == 0:
                     dist = len(hw)
@@ -235,6 +349,8 @@ def main() -> None:
                     "audio": ex["audio"],
                     "reference_raw": extract_reference_text(ex["text"]),
                     "hypothesis_raw": pr,
+                    "hypothesis_umsc_action": act,
+                    "hypothesis_for_scoring_raw": h_raw_sc,
                     "reference_norm": rr,
                     "hypothesis_norm": hh,
                     "utterance_word_errors": dist,

@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
 # coding=utf-8
 """
-Evaluate Meta omnilingual-asr on a Qwen3-style jsonl manifest (same protocol as
-finetuning/eval_uyghur_asr_jsonl.py): NFC normalization, ZWSP stripped,
-whitespace collapsed, corpus-level WER/CER via jiwer (or built-in Levenshtein).
+Evaluate Meta omnilingual-asr on a Qwen3-style Cantonese jsonl manifest.
 
-Uyghur (Common Voice Arabic orthography) uses fairseq2 language id uig_Arab;
-see omnilingual_asr/models/wav2vec2_llama/lang_ids.py.
+This follows the same omnilingual-asr inference path as
+`evaluation/uyghur/baselines/eval_uyghur_asr_omnilingual_jsonl.py`, but uses Cantonese-friendly scoring:
+  - CER (primary)
+  - Sentence accuracy
+  - Hanzi script normalization (default: convert both ref/hyp to Traditional Chinese)
+  - Unicode punctuation removed before scoring
 
-Dependencies:
+Recommended dependencies:
   - Install omnilingual-asr (editable recommended), e.g.:
       pip install -e /path/to/omnilingual-asr
   - fairseq2 and other deps per that repo's README
-  - pip install jiwer   (optional but recommended; matches Qwen eval script)
-  - librosa (for MP3 / formats fairseq2 AudioDecoder does not support; same as Qwen stack)
+  - pip install jiwer opencc-python-reimplemented cn2an
+  - librosa (for mp3 / mixed corpora)
+
+Default language id is `yue_Hant`, which matches omnilingual-asr's documented
+`{language_code}_{script}` naming. If your local omnilingual-asr install uses a
+different Cantonese id, pass `--omnilingual_lang` explicitly.
 
 Example:
-  python baselines/eval_uyghur_asr_omnilingual_jsonl.py \
-    --jsonl data/ug_test_qwen3.jsonl \
+  python evaluation/cantonese/baselines/eval_cantonese_asr_omnilingual_jsonl.py \
+    --jsonl data/cantonese/wsyue_asr/wsyue_asr_eval_qwen3.jsonl \
     --model_card omniASR_LLM_1B_v2 \
-    --omnilingual_lang uig_Arab \
-    --max_samples 2000 \
+    --omnilingual_lang yue_Hant \
     --batch_size 4 \
-    --output_predictions outputs/omniASR_LLM_1B_v2/predictions.jsonl
+    --output_predictions outputs/omniASR_LLM_1B_v2/wsyue_predictions.jsonl
 """
 
 from __future__ import annotations
@@ -33,12 +38,14 @@ import os
 import re
 import sys
 import unicodedata
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Sequence, Union
 
 import numpy as np
 import torch
 
 _ASR_TEXT_TAG = "<asr_text>"
+_ZW_RE = re.compile(r"[\u200c\u200d\ufeff]")
+_CN_NUMERAL_RE = re.compile(r"[零〇一二两三四五六七八九十百千万億亿壹贰叁肆伍陆柒捌玖拾佰仟萬廿卅]+")
 
 # Wav2Vec2 stack needs enough raw samples; shorter clips collapse to length 1 after striding and crash conv1d.
 _WAV2VEC2_MIN_SAMPLES_16K = 16000
@@ -46,7 +53,7 @@ _WAV2VEC2_MIN_SAMPLES_16K = 16000
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Uyghur ASR eval with omnilingual-asr (same scoring as Qwen3 jsonl eval)."
+        description="Cantonese ASR eval with omnilingual-asr on Qwen3 jsonl: CER + sentence accuracy."
     )
     p.add_argument("--jsonl", type=str, required=True, help="Manifest: lines with audio + text.")
     p.add_argument(
@@ -58,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--omnilingual_lang",
         type=str,
-        default="uig_Arab",
+        default="yue_Hant",
         help="fairseq2 language id passed to transcribe() (ignored for pure CTC cards).",
     )
     p.add_argument("--max_samples", type=int, default=0, help="If >0, only first N rows.")
@@ -79,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         "--output_predictions",
         type=str,
         default="",
-        help="If set, write jsonl with ref/hyp/errors per line (same schema as Qwen eval).",
+        help="If set, write jsonl with ref/hyp/errors per line.",
     )
     p.add_argument(
         "--audio_input",
@@ -94,14 +101,24 @@ def parse_args() -> argparse.Namespace:
         "--min_samples_16k",
         type=int,
         default=16000,
-        help="Pad 16 kHz waveform to at least max(16000, this value) samples (trailing zeros). "
-        "16000≈1s; raises floor only when set higher.",
+        help="Pad 16 kHz waveform to at least max(16000, this value) samples (trailing zeros).",
+    )
+    p.add_argument(
+        "--keep_whitespace",
+        action="store_true",
+        help="Keep whitespace for CER. Default is to remove all whitespace before scoring.",
+    )
+    p.add_argument(
+        "--hanzi_script_norm",
+        type=str,
+        default="to_traditional",
+        choices=("off", "to_traditional", "to_simplified"),
+        help="Normalize Hanzi script before scoring. Default: convert both ref/hyp to Traditional Chinese.",
     )
     return p.parse_args()
 
 
 def extract_reference_text(label: str) -> str:
-    """Strip Qwen3 training prefix like 'language Uyghur<asr_text>...'."""
     s = (label or "").strip()
     if not s:
         return ""
@@ -110,14 +127,56 @@ def extract_reference_text(label: str) -> str:
     return s
 
 
-_ZW_RE = re.compile(r"[\u200c\u200d\ufeff]")
+def build_hanzi_script_converter(mode: str):
+    key = (mode or "off").strip().lower()
+    if key == "off":
+        return None
+    config_map = {
+        "to_traditional": "s2t",
+        "to_simplified": "t2s",
+    }
+    try:
+        from opencc import OpenCC  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise SystemExit(
+            "Install OpenCC first for Hanzi script normalization: pip install opencc-python-reimplemented"
+        ) from exc
+    cc = OpenCC(config_map[key])
+    return cc.convert
 
 
-def normalize_for_scoring(s: str) -> str:
-    """NFC, drop common zero-width chars, collapse whitespace."""
+def remove_unicode_punctuation(s: str) -> str:
+    return "".join(ch for ch in s if not unicodedata.category(ch).startswith("P"))
+
+
+def apply_number_itn(s: str) -> str:
+    try:
+        import cn2an  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise SystemExit("Install cn2an first for number ITN: pip install cn2an") from exc
+
+    def repl(match: re.Match[str]) -> str:
+        token = match.group(0)
+        try:
+            return str(cn2an.cn2an(token, "smart"))
+        except Exception:
+            return token
+
+    return _CN_NUMERAL_RE.sub(repl, s)
+
+
+def normalize_for_scoring(s: str, *, keep_whitespace: bool, hanzi_script_converter) -> str:
     s = unicodedata.normalize("NFC", (s or "").strip())
     s = _ZW_RE.sub("", s)
-    s = " ".join(s.split())
+    if hanzi_script_converter is not None:
+        s = hanzi_script_converter(s)
+    s = s.lower()
+    s = apply_number_itn(s)
+    s = remove_unicode_punctuation(s)
+    if keep_whitespace:
+        s = " ".join(s.split())
+    else:
+        s = "".join(s.split())
     return s
 
 
@@ -138,39 +197,26 @@ def _levenshtein_1d(a: Sequence[Any], b: Sequence[Any]) -> int:
     return prev[lb]
 
 
-def corpus_wer_cer_fallback(refs: List[str], hyps: List[str]) -> Tuple[float, float]:
-    """Corpus-level WER/CER via summed edit distance / summed reference length."""
-    w_err, w_den = 0, 0
+def corpus_cer_fallback(refs: List[str], hyps: List[str]) -> float:
     c_err, c_den = 0, 0
     for r, h in zip(refs, hyps):
-        rw = r.split()
-        hw = h.split()
-        if len(rw) == 0 and len(hw) == 0:
-            pass
-        elif len(rw) == 0:
-            w_err += len(hw)
-            w_den += max(len(hw), 1)
-        else:
-            w_err += _levenshtein_1d(rw, hw)
-            w_den += len(rw)
-
         rc = list(r)
         hc = list(h)
         if len(rc) == 0 and len(hc) == 0:
-            pass
-        elif len(rc) == 0:
+            continue
+        if len(rc) == 0:
             c_err += len(hc)
             c_den += max(len(hc), 1)
         else:
             c_err += _levenshtein_1d(rc, hc)
             c_den += len(rc)
-    return w_err / max(w_den, 1), c_err / max(c_den, 1)
+    return c_err / max(c_den, 1)
 
 
-def corpus_wer_cer_jiwer(refs: List[str], hyps: List[str]) -> Tuple[float, float]:
-    import jiwer
+def corpus_cer_jiwer(refs: List[str], hyps: List[str]) -> float:
+    import jiwer  # pyright: ignore[reportMissingImports]
 
-    return float(jiwer.wer(refs, hyps)), float(jiwer.cer(refs, hyps))
+    return float(jiwer.cer(refs, hyps))
 
 
 def load_manifest(path: str, max_samples: int) -> List[Dict[str, Any]]:
@@ -206,11 +252,6 @@ def resolve_torch_dtype(name: str) -> torch.dtype:
 
 
 def load_audio_waveform_dict(path: str, min_samples_16k: int) -> Dict[str, Any]:
-    """Load audio as dict for ASRInferencePipeline (bypasses fairseq2 file decoder).
-
-    Resamples to 16 kHz to match model input; pads short clips so the wav2vec2
-    front-end never sees degenerate lengths after striding (conv kernel > length).
-    """
     import librosa
 
     floor = max(_WAV2VEC2_MIN_SAMPLES_16K, max(0, int(min_samples_16k)))
@@ -219,7 +260,6 @@ def load_audio_waveform_dict(path: str, min_samples_16k: int) -> Dict[str, Any]:
         wav = np.zeros(floor, dtype=np.float32)
     elif int(wav.shape[0]) < floor:
         wav = np.pad(wav, (0, floor - int(wav.shape[0])), mode="constant")
-    # Time-major: 1D (T,) or (T, C). Shape (1, T) is wrong here — convert_to_mono uses dim1 as channels.
     w = torch.from_numpy(wav.astype("float32", copy=False))
     return {"waveform": w, "sample_rate": 16000}
 
@@ -227,10 +267,8 @@ def load_audio_waveform_dict(path: str, min_samples_16k: int) -> Dict[str, Any]:
 def build_transcribe_inputs(
     batch_paths: List[str], audio_input: str, min_samples_16k: int
 ) -> Union[List[str], List[Dict[str, Any]]]:
-    """Pipeline requires a homogeneous batch: all paths or all waveform dicts."""
     if audio_input == "path":
         return batch_paths
-    # auto == librosa: always decode + pad (avoids mp3 decode errors and short-wav crashes on native path)
     return [load_audio_waveform_dict(p, min_samples_16k) for p in batch_paths]
 
 
@@ -298,27 +336,43 @@ def main() -> None:
         print("Internal error: prediction count mismatch.", file=sys.stderr)
         sys.exit(1)
 
-    refs = [normalize_for_scoring(r) for r in refs_raw]
-    hyps = [normalize_for_scoring(h) for h in predictions]
+    hanzi_script_converter = build_hanzi_script_converter(args.hanzi_script_norm)
+    refs = [
+        normalize_for_scoring(r, keep_whitespace=args.keep_whitespace, hanzi_script_converter=hanzi_script_converter)
+        for r in refs_raw
+    ]
+    hyps = [
+        normalize_for_scoring(h, keep_whitespace=args.keep_whitespace, hanzi_script_converter=hanzi_script_converter)
+        for h in predictions
+    ]
 
     try:
-        wer, cer = corpus_wer_cer_jiwer(refs, hyps)
+        cer = corpus_cer_jiwer(refs, hyps)
         backend = "jiwer"
     except ImportError:
-        wer, cer = corpus_wer_cer_fallback(refs, hyps)
+        cer = corpus_cer_fallback(refs, hyps)
         backend = "builtin_levenshtein"
 
+    exact_matches = sum(1 for r, h in zip(refs, hyps) if r == h)
+    sentence_accuracy = exact_matches / max(len(refs), 1)
+
     print("")
-    print("=== Uyghur ASR metrics (omnilingual-asr) ===")
-    print(f"Model card:  {args.model_card}")
-    print(f"Lang id:     {lang}")
-    print(f"Samples:     {len(rows)}")
-    print(f"Scoring:     NFC, ZWSP removed, whitespace collapsed")
-    print(f"Backend:     {backend}")
-    print(f"WER:         {wer * 100:.2f}%")
-    print(f"CER:         {cer * 100:.2f}%")
+    print("=== Cantonese ASR metrics (omnilingual-asr) ===")
+    print(f"Model card:         {args.model_card}")
+    print(f"Lang id:            {lang}")
+    print(f"Samples:            {len(rows)}")
+    print(
+        "Scoring:            "
+        f"NFC, ZWSP removed, English lowercased, number ITN, Unicode punctuation removed, "
+        f"Hanzi={args.hanzi_script_norm}, whitespace="
+        f"{'kept' if args.keep_whitespace else 'removed'}"
+    )
+    print(f"Backend:            {backend}")
+    print(f"CER:                {cer * 100:.2f}%")
+    print(f"Sentence Accuracy:  {sentence_accuracy * 100:.2f}%")
     print("")
-    print("Note: Same normalization and WER/CER definition as finetuning/eval_uyghur_asr_jsonl.py.")
+    print("Note: For Cantonese Han-character transcripts, CER is the primary metric.")
+    print("      WER based on whitespace tokenization is usually not meaningful and is omitted.")
 
     if args.output_predictions:
         out_path = args.output_predictions
@@ -327,19 +381,16 @@ def main() -> None:
             os.makedirs(parent, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as wf:
             for ex, rr, hh, pr in zip(rows, refs, hyps, predictions):
-                rw, hw = rr.split(), hh.split()
-                if len(rw) == 0:
-                    dist = len(hw)
-                else:
-                    dist = _levenshtein_1d(rw, hw)
+                dist = _levenshtein_1d(list(rr), list(hh))
                 rec = {
                     "audio": ex["audio"],
                     "reference_raw": extract_reference_text(ex["text"]),
                     "hypothesis_raw": pr,
                     "reference_norm": rr,
                     "hypothesis_norm": hh,
-                    "utterance_word_errors": dist,
-                    "reference_word_count": max(len(rw), 1) if len(rw) == 0 else len(rw),
+                    "utterance_char_errors": dist,
+                    "reference_char_count": max(len(rr), 1),
+                    "exact_match": rr == hh,
                 }
                 wf.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"Wrote predictions to {out_path}")
