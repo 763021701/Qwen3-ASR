@@ -7,7 +7,19 @@ description: End-to-end Qwen3-ASR fine-tuning for new corpora or low-resource la
 
 ## 目标
 
-在新数据集或新小语种任务出现时，按本 skill **独立完成**：原始数据探查 → 写出转换脚本 → 生成训练/验证 jsonl → tokenizer 抽检 → 启动 `finetuning/qwen3_asr_sft.py` →（可选）用现有 eval 脚本跑评测。
+在新数据集或新小语种任务出现时，按本 skill **独立完成**：原始数据探查 → 写出/选择 pipeline 配置 → 生成训练/验证/测试 jsonl → 校验 manifest → 启动 `finetuning/qwen3_asr_sft.py` → 用现有 eval 脚本跑评测。
+
+优先使用统一入口：
+
+```bash
+python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage all
+```
+
+先用 dry-run 检查命令：
+
+```bash
+python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage all --dry_run 1
+```
 
 ## 数据契约（必须遵守）
 
@@ -33,11 +45,11 @@ description: End-to-end Qwen3-ASR fine-tuning for new corpora or low-resource la
 ```
 - [ ] 1. 阅读原始数据：目录结构、元数据格式（tsv/csv/json/JSONL/Kaldi scp+text）、音频扩展名与路径列名
 - [ ] 2. 选定 `SUPPORTED_LANGUAGES` 中的语言标签；与用户确认不在列表时的策略
-- [ ] 3. 编写或扩展转换脚本（见下一节），输出到 `data/<language>/<dataset>/<name>_{train|dev|test}_qwen3.jsonl`
-- [ ] 4. 校验：随机抽若干行，确认 `audio` 文件存在；`text` 均含 `language ` 与 `<asr_text>`
+- [ ] 3. 编写或更新 `configs/...yaml`，用 `tools/qwen3_asr_pipeline.py --stage prepare` 输出 train/dev/test jsonl
+- [ ] 4. 校验：运行 `tools/qwen3_asr_pipeline.py --stage validate`，确认 `audio` 文件存在；`text` 均含 `language ` 与 `<asr_text>`
 - [ ] 5. Tokenizer：对 **最终 `text` 串**（或至少 `<asr_text>` 后正文）抽样 encode，检查 UNK 与 decode 回退（可参考 `evaluation/tools/verify_tokenizer_cv_ug.py` 的逻辑，按新语料改输入源）
-- [ ] 6. 训练：`python finetuning/qwen3_asr_sft.py --train_file ... [--eval_file ...] --model_path ... --output_dir ...`（按需调 `batch_size`/`grad_acc`/`lr`/`epochs`）
-- [ ] 7. 评测：使用与本仓库一致的 jsonl 与 `evaluation/<language>/eval_*_jsonl.py` 或项目内对应语种脚本；`quick_eval.sh` 中有注释示例
+- [ ] 6. 训练：`python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage train`
+- [ ] 7. 评测：`python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage eval`，默认选择训练输出目录下 step 最大的 `checkpoint-*`
 ```
 
 ## 新数据集：转换脚本写法

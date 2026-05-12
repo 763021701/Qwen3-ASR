@@ -1,0 +1,36 @@
+run_name: ug_common_voice_sft
+
+dataset:
+  source_type: common_voice
+  language: Uyghur
+  train_source: /data/cv/ug/train.tsv
+  dev_source: /data/cv/ug/dev.tsv
+  test_source: /data/cv/ug/test.tsv
+  clips_dir: /data/cv/ug/clips
+  output_dir: data/uyghur/common_voice_pipeline
+  check_audio: 1
+  split_seed: 42
+
+training:
+  model_path: Qwen/Qwen3-ASR-1.7B
+  output_dir: outputs/ug_common_voice_sft
+  batch_size: 4
+  grad_acc: 8
+  lr: 2e-5
+  epochs: 3
+  save_steps: 300
+  save_total_limit: 3
+  log_steps: 20
+  sr: 16000
+
+evaluation:
+  eval_script: evaluation/uyghur/eval_uyghur_asr_jsonl.py
+  language: Uyghur
+  batch_size: 8
+  max_samples: 0
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false
