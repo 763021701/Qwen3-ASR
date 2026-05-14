@@ -12,7 +12,7 @@
 
 ## Tokenizer 验证建议
 
-- `evaluation/tools/verify_tokenizer_cv_ug.py`：从 TSV 的 `sentence` 列做 round-trip；新语料可仿照其逻辑，改为从生成的 jsonl 读 `text`，或对 strip 掉前缀后的转写做检查。
+- `tools/verify_tokenizer_cv_ug.py`：从 TSV 的 `sentence` 列做 round-trip；新语料可仿照其逻辑，改为从生成的 jsonl 读 `text`，或对 strip 掉前缀后的转写做检查。
 - 若大量出现 UNK：检查是否应用了与训练一致的 Unicode 规范化；或考虑换更大 checkpoint / 与用户确认是否可接受子词切分。
 
 ## 常见问题

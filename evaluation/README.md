@@ -1,6 +1,6 @@
 # Evaluation layout
 
-Scripts and baselines are grouped by **language**, then by **dataset** or role. Shared utilities live in `evaluation/tools/`.
+Scripts and baselines are grouped by **language**, then by **dataset** or role. Evaluation-only utilities live in `evaluation/tools/`; data preparation and training pipeline utilities live in top-level `tools/`.
 
 Run commands from the **repository root** so `qwen_asr` imports resolve.
 
@@ -8,9 +8,9 @@ Run commands from the **repository root** so `qwen_asr` imports resolve.
 
 | Script | Purpose |
 |--------|---------|
-| `tools/convert_to_qwen3_asr_jsonl.py` | Build Qwen3-ASR training jsonl from wav.scp / other sources |
-| `tools/extract_ref_hyp_csv.py` | Extract reference / hypothesis columns to CSV |
-| `tools/verify_tokenizer_cv_ug.py` | Tokenizer round-trip check (example: Common Voice TSV) |
+| `evaluation/tools/extract_ref_hyp_csv.py` | Extract reference / hypothesis columns to CSV |
+
+Data preparation helpers such as repository-level `tools/convert_to_qwen3_asr_jsonl.py` and `tools/verify_tokenizer_cv_ug.py` live in `tools/` because they are used before training, not only during evaluation.
 
 ## `chinese/`
 

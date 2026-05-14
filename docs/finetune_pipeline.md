@@ -74,6 +74,17 @@ python tools/validate_qwen3_asr_jsonl.py \
 Validation checks JSON syntax, required fields, audio existence, label format,
 and whether the language is in `qwen_asr/inference/utils.py`.
 
+## Utility Scripts
+
+Training and data-preparation utilities live under repository-level `tools/`.
+This keeps pre-training helpers separate from `evaluation/`, which is reserved
+for eval drivers, baselines, and evaluation-output analysis.
+
+- `tools/qwen3_asr_pipeline.py` — end-to-end prepare / validate / train / eval wrapper.
+- `tools/convert_to_qwen3_asr_jsonl.py` — convert Common Voice, Kaldi, or FunASR-style data into Qwen3-ASR finetuning JSONL.
+- `tools/validate_qwen3_asr_jsonl.py` — validate manifest schema, audio paths, and language tags.
+- `tools/verify_tokenizer_cv_ug.py` — tokenizer round-trip smoke test for Common Voice Uyghur TSV text.
+
 ## Outputs
 
 Training writes checkpoints under `training.output_dir`. Evaluation defaults to

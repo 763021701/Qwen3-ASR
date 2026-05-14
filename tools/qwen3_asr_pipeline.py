@@ -217,7 +217,7 @@ def _convert_command(
     dataset: Dict[str, Any],
     language: str,
 ) -> List[str]:
-    script = abspath("evaluation/tools/convert_to_qwen3_asr_jsonl.py")
+    script = abspath("tools/convert_to_qwen3_asr_jsonl.py")
     cmd = [sys.executable, script, "--output_file", output_file, "--language", language]
     if source_type == "common_voice":
         clips_dir = str(dataset.get("clips_dir") or "")

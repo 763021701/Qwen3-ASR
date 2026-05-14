@@ -3,12 +3,12 @@
 Verify Qwen3-ASR text tokenizer round-trip on Common Voice Uyghur test.tsv (column: sentence).
 
 Usage:
-  python evaluation/tools/verify_tokenizer_cv_ug.py \\
-    --tsv /path/to/ug/test.tsv \\
+  python tools/verify_tokenizer_cv_ug.py \
+    --tsv /path/to/ug/test.tsv \
     --model_path Qwen/Qwen3-ASR-1.7B
 
 Or with a local checkpoint that contains tokenizer files:
-  python evaluation/tools/verify_tokenizer_cv_ug.py --tsv ... --model_path outputs/.../checkpoint-69
+  python tools/verify_tokenizer_cv_ug.py --tsv ... --model_path outputs/.../checkpoint-69
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def verify_roundtrip(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Verify Qwen2 tokenizer on CV ug test.tsv sentences.")
+    p = argparse.ArgumentParser(description="Verify Qwen3-ASR tokenizer on CV ug TSV sentences.")
     p.add_argument(
         "--tsv",
         type=Path,

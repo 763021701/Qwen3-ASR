@@ -47,7 +47,7 @@ python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage all --dry_run 1
 - [ ] 2. 选定 `SUPPORTED_LANGUAGES` 中的语言标签；与用户确认不在列表时的策略
 - [ ] 3. 编写或更新 `configs/...yaml`，用 `tools/qwen3_asr_pipeline.py --stage prepare` 输出 train/dev/test jsonl
 - [ ] 4. 校验：运行 `tools/qwen3_asr_pipeline.py --stage validate`，确认 `audio` 文件存在；`text` 均含 `language ` 与 `<asr_text>`
-- [ ] 5. Tokenizer：对 **最终 `text` 串**（或至少 `<asr_text>` 后正文）抽样 encode，检查 UNK 与 decode 回退（可参考 `evaluation/tools/verify_tokenizer_cv_ug.py` 的逻辑，按新语料改输入源）
+- [ ] 5. Tokenizer：对 **最终 `text` 串**（或至少 `<asr_text>` 后正文）抽样 encode，检查 UNK 与 decode 回退（可参考 `tools/verify_tokenizer_cv_ug.py` 的逻辑，按新语料改输入源）
 - [ ] 6. 训练：`python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage train`
 - [ ] 7. 评测：`python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage eval`，默认选择训练输出目录下 step 最大的 `checkpoint-*`
 ```

@@ -297,7 +297,7 @@ def iter_from_cv_multilingual_corpus(
         raise ValueError("No locales provided for multilingual Common Voice conversion.")
     if language_labels is not None and len(language_labels) != len(locales):
         raise ValueError(
-            f"--cv_languages length ({len(language_labels)}) must match --cv_locales ({len(locales)})."
+            f"--cv_languages length ({len(language_labels)}) must match --cv_locales ({locales})."
         )
 
     anchor_key = balance_cap_locale.strip()
