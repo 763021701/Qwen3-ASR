@@ -31,4 +31,4 @@
 
 ## 评测脚本线索
 
-仓库内按语种/任务有不同 `evaluation/<lang>/eval_*_jsonl.py` 与 `evaluation/<lang>/baselines/`；`quick_eval.sh` 含注释调用示例。新语种优先复用与「同推理接口」最接近的 eval 脚本并改 `--language` 或 jsonl 路径。
+仓库内按语种/任务有不同 `evaluation/<lang>/eval_*_jsonl.py` 与 `evaluation/<lang>/baselines/`；`evaluation/README.md` 含常用评测调用示例。新语种优先复用与「同推理接口」最接近的 eval 脚本并改 `--language` 或 jsonl 路径。
