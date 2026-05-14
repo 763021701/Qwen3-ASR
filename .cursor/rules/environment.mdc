@@ -1,0 +1,30 @@
+---
+description: Use the project Conda environment
+alwaysApply: true
+---
+
+When running shell commands for this project, always use the Conda environment named `qwen3_asr_ft`.
+
+For Python commands, use:
+
+    conda run -n qwen3_asr_ft python
+
+For package installation, use:
+
+    conda run -n qwen3_asr_ft pip install <package>
+
+For running tests, use:
+
+    conda run -n qwen3_asr_ft pytest
+
+Do not use the system Python.
+
+Do not use plain `python`, `python3`, `pip`, or `pip3` unless the Conda environment is already active.
+
+Before running Python-related commands, prefer verifying the interpreter with:
+
+    conda run -n qwen3_asr_ft python -c "import sys; print(sys.executable)"
+
+If a command needs to run a Python module, use:
+
+    conda run -n qwen3_asr_ft python -m <module>

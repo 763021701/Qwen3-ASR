@@ -3,10 +3,10 @@ run_name: ug_common_voice_sft
 dataset:
   source_type: common_voice
   language: Uyghur
-  train_source: /data/cv/ug/train.tsv
-  dev_source: /data/cv/ug/dev.tsv
-  test_source: /data/cv/ug/test.tsv
-  clips_dir: /data/cv/ug/clips
+  train_source: /root/autodl-tmp/workspace/dataset/cv-corpus-25.0-2026-03-09/ug/train.tsv
+  dev_source: /root/autodl-tmp/workspace/dataset/cv-corpus-25.0-2026-03-09/ug/dev.tsv
+  test_source: /root/autodl-tmp/workspace/dataset/cv-corpus-25.0-2026-03-09/ug/test.tsv
+  clips_dir: /root/autodl-tmp/workspace/dataset/cv-corpus-25.0-2026-03-09/ug/clips
   output_dir: data/uyghur/common_voice_pipeline
   check_audio: 1
   split_seed: 42

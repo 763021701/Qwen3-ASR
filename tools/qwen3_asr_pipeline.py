@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
 import random
@@ -105,12 +106,51 @@ def save_resolved_config(config: Dict[str, Any], output_dir: str) -> str:
     return path
 
 
-def run_command(cmd: List[str], dry_run: bool = False) -> None:
+def run_command(cmd: List[str], dry_run: bool = False, log_file: Optional[str] = None) -> None:
     printable = " ".join(shlex.quote(x) for x in cmd)
     print(f"[cmd] {printable}")
+    if log_file:
+        print(f"[log] {log_file}")
     if dry_run:
         return
-    subprocess.run(cmd, check=True)
+    if not log_file:
+        subprocess.run(cmd, check=True)
+        return
+
+    parent = os.path.dirname(os.path.abspath(log_file))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    started = _dt.datetime.now().isoformat(timespec="seconds")
+    with open(log_file, "ab") as log:
+        header = f"\n===== {started} =====\n[cmd] {printable}\n\n".encode("utf-8")
+        log.write(header)
+        log.flush()
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            bufsize=0,
+        )
+        assert process.stdout is not None
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            log.write(chunk)
+            log.flush()
+        returncode = process.wait()
+        ended = _dt.datetime.now().isoformat(timespec="seconds")
+        footer = f"\n[exit_code] {returncode}\n[ended_at] {ended}\n".encode("utf-8")
+        log.write(footer)
+        log.flush()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
 
 
 def find_latest_checkpoint(output_dir: str) -> Optional[str]:
@@ -304,7 +344,7 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
             cmd.extend([flag, str(training[key])])
     if runtime.get("resume") is True and "resume" not in training:
         cmd.extend(["--resume", "1"])
-    run_command(cmd, dry_run=dry_run)
+    run_command(cmd, dry_run=dry_run, log_file=os.path.join(output_dir, "logs", "train.log"))
 
 
 def stage_eval(config: Dict[str, Any], dry_run: bool) -> None:
@@ -350,7 +390,7 @@ def stage_eval(config: Dict[str, Any], dry_run: bool) -> None:
     for key, flag in option_map.items():
         if key in evaluation:
             cmd.extend([flag, str(evaluation[key])])
-    run_command(cmd, dry_run=dry_run)
+    run_command(cmd, dry_run=dry_run, log_file=os.path.join(output_dir, "logs", "eval.log"))
 
 
 def parse_args() -> argparse.Namespace:
