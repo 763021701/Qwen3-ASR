@@ -67,6 +67,7 @@ SUPPORTED_LANGUAGES: List[str] = [
     "Hungarian",
     "Macedonian"
 ]
+_LANG_ORDER = {name: i for i, name in enumerate(SUPPORTED_LANGUAGES)}
 _ASR_TEXT_TAG = "<asr_text>"
 _LANG_PREFIX = "language "
 
@@ -105,6 +106,89 @@ def validate_language(language: str) -> None:
     """
     if language not in SUPPORTED_LANGUAGES:
         raise ValueError(f"Unsupported language: {language}. Supported: {SUPPORTED_LANGUAGES}")
+
+
+def split_language_spec(language_spec: str) -> List[str]:
+    """
+    Split a comma-separated language spec into normalized atomic language names.
+
+    Segment order follows the input string (no reordering). For training/inference alignment,
+    use ``normalize_language_spec`` which also sorts multi-language specs by ``SUPPORTED_LANGUAGES``.
+
+    Args:
+        language_spec: One or more language names separated by commas.
+
+    Returns:
+        List of normalized names (see normalize_language_name).
+
+    Raises:
+        ValueError: If the spec is empty after stripping parts.
+    """
+    parts = [p.strip() for p in str(language_spec).split(",") if p.strip()]
+    if not parts:
+        raise ValueError("language spec is empty")
+    return [normalize_language_name(p) for p in parts]
+
+
+def _sort_language_spec_atoms(atoms: List[str]) -> List[str]:
+    """
+    Order atoms by their index in ``SUPPORTED_LANGUAGES`` (list order in this file).
+
+    Sole ``None`` (single atom) is left unchanged. Duplicates are kept. Atoms not in
+    the supported list (e.g. raw model output before validation) sort after all supported
+    names, ordered by atom string for stability.
+    """
+    if len(atoms) == 1 and atoms[0] == "None":
+        return list(atoms)
+
+    def sort_key(a: str) -> tuple:
+        idx = _LANG_ORDER.get(a)
+        if idx is not None:
+            return (0, idx, a)
+        return (1, a, a)
+
+    return sorted(atoms, key=sort_key)
+
+
+def normalize_language_spec(language: str) -> str:
+    """
+    Normalize a single language or comma-separated multi-language (code-switch) spec.
+
+    Each comma-separated segment is normalized via normalize_language_name(). For specs with
+    **two or more** atoms, segments are then **sorted by** ``SUPPORTED_LANGUAGES`` **list
+    order** (the order they appear in ``qwen_asr/inference/utils.py``) so e.g. ``English,Chinese`` and ``Chinese,English`` both become ``Chinese,English``.
+    A sole ``None`` is unchanged. Duplicates are not removed.
+
+    Args:
+        language: Raw language spec, e.g. ``"chinese, english"`` or ``"English,Chinese"``.
+
+    Returns:
+        Canonical spec string, e.g. ``"Chinese,English"``.
+    """
+    atoms = split_language_spec(language)
+    atoms = _sort_language_spec_atoms(atoms)
+    return ",".join(atoms)
+
+
+def validate_language_spec(language_spec: str) -> None:
+    """
+    Validate a language spec: each atom must be supported, except a sole ``"None"``.
+
+    ``"None"`` is only allowed as the entire spec (same semantics as ``language None`` in labels).
+
+    Raises:
+        ValueError: If any atom is unsupported or ``"None"`` is mixed with other languages.
+    """
+    atoms = split_language_spec(language_spec)
+    if len(atoms) == 1 and atoms[0] == "None":
+        return
+    for a in atoms:
+        if a == "None":
+            raise ValueError(
+                "Invalid language spec: 'None' may only appear as the sole language spec, "
+                f"got {language_spec!r}."
+            )
+        validate_language(a)
 
 
 def ensure_list(x: MaybeList) -> List[Any]:
@@ -414,12 +498,12 @@ def parse_asr_output(
       - No tag: treat whole string as text.
       - "language None<asr_text>": treat as empty audio -> ("", "")
 
-    If user_language is provided, language is forced to user_language and raw is treated as text-only
-    (the model is expected to output plain transcription without metadata).
+    If user_language is provided, language is forced to the normalized language spec and raw is
+    treated as text-only (the model is expected to output plain transcription without metadata).
 
     Args:
         raw: Raw decoded string.
-        user_language: Canonical language name if user forced language.
+        user_language: Single language or comma-separated spec if user forced language.
 
     Returns:
         Tuple[str, str]: (language, text)
@@ -434,7 +518,9 @@ def parse_asr_output(
 
     if user_language:
         # user explicitly forced language => model output is treated as pure text
-        return user_language, s
+        spec = normalize_language_spec(str(user_language).strip())
+        validate_language_spec(spec)
+        return spec, s
 
     meta_part = s
     text_part = ""
@@ -465,7 +551,7 @@ def parse_asr_output(
         if low.startswith(_LANG_PREFIX):
             val = line[len(_LANG_PREFIX):].strip()
             if val:
-                lang = normalize_language_name(val)
+                lang = normalize_language_spec(val)
             break
 
     return lang, text_part.strip()

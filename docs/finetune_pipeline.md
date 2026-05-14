@@ -57,11 +57,15 @@ Each line must contain:
 
 ```json
 {"audio": "/absolute/audio.wav", "text": "language Uyghur<asr_text>transcript"}
+{"audio": "/absolute/audio.wav", "text": "language Chinese,English<asr_text>mixed transcript"}
 ```
+
+For code-switching, `language` may list several **atomic** language names from `SUPPORTED_LANGUAGES` in `qwen_asr/inference/utils.py`, separated by commas (e.g. `Chinese,English`). Multi-language specs are **canonicalized** to the order languages appear in that `SUPPORTED_LANGUAGES` list so training and inference stay consistent. The combined string is **not** added as one entry to `SUPPORTED_LANGUAGES`.
 
 ## Validation
 
-Run the validator directly when debugging data issues:
+Run the validator directly when debugging data issues. Optional `--language`
+filters records to a normalized single- or multi-language spec (e.g. `Uyghur` or `Chinese,English`).
 
 ```bash
 python tools/validate_qwen3_asr_jsonl.py \
@@ -71,8 +75,10 @@ python tools/validate_qwen3_asr_jsonl.py \
   --output_report outputs/ug_common_voice_sft/validation/train_manifest_validation.json
 ```
 
-Validation checks JSON syntax, required fields, audio existence, label format,
-and whether the language is in `qwen_asr/inference/utils.py`.
+Validation checks JSON syntax, required fields, audio existence, label format
+(`language {Name[,Name...]}<asr_text>{transcript}`), and that every language
+token in the label is listed in `SUPPORTED_LANGUAGES` inside `qwen_asr/inference/utils.py`
+(comma-separated specs are supported; `None` is only allowed alone, e.g. `language None<asr_text>...`).
 
 ## Utility Scripts
 

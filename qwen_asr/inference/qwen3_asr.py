@@ -42,10 +42,10 @@ from .utils import (
     chunk_list,
     merge_languages,
     normalize_audios,
-    normalize_language_name,
+    normalize_language_spec,
     parse_asr_output,
     split_audio_into_chunks,
-    validate_language,
+    validate_language_spec,
 )
 
 try:
@@ -522,8 +522,8 @@ class Qwen3ASRModel:
 
         lang_norm: Optional[str] = None
         if language is not None and str(language).strip():
-            lang_norm = normalize_language_name(str(language))
-            validate_language(lang_norm)
+            lang_norm = normalize_language_spec(str(language))
+            validate_language_spec(lang_norm)
 
         use_cuda_streams = self.device is not None and self.device.type == "cuda"
 
@@ -685,8 +685,8 @@ class Qwen3ASRModel:
             if l is None or str(l).strip() == "":
                 langs_norm.append(None)
             else:
-                ln = normalize_language_name(str(l))
-                validate_language(ln)
+                ln = normalize_language_spec(str(l))
+                validate_language_spec(ln)
                 langs_norm.append(ln)
 
         max_chunk_sec = MAX_FORCE_ALIGN_INPUT_SECONDS if return_time_stamps else MAX_ASR_INPUT_SECONDS
@@ -1094,8 +1094,8 @@ class Qwen3ASRModel:
 
         force_language = None
         if language is not None and str(language).strip() != "":
-            ln = normalize_language_name(str(language))
-            validate_language(ln)
+            ln = normalize_language_spec(str(language))
+            validate_language_spec(ln)
             force_language = ln
 
         chunk_size_samples = int(round(float(chunk_size_sec) * SAMPLE_RATE))

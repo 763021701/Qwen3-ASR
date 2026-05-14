@@ -10,7 +10,9 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
+
+from qwen_asr.inference.utils import normalize_language_spec, split_language_spec, validate_language_spec
 
 
 _LABEL_RE = re.compile(r"^language\s+([^<]+)<asr_text>(.*)$", re.DOTALL)
@@ -54,6 +56,24 @@ def load_supported_languages(repo_root: Optional[str] = None) -> List[str]:
     raise RuntimeError(f"SUPPORTED_LANGUAGES not found in {utils_path}")
 
 
+def _validate_language_spec_against_allowed(lang_norm: str, allowed: Optional[Set[str]]) -> None:
+    """Validate normalized spec; if allowed is set, each atom must be in allowed (except sole None)."""
+    if allowed is None:
+        validate_language_spec(lang_norm)
+        return
+    atoms = split_language_spec(lang_norm)
+    if len(atoms) == 1 and atoms[0] == "None":
+        return
+    for a in atoms:
+        if a == "None":
+            raise ValueError(
+                "Invalid language spec: 'None' may only appear as the sole language spec, "
+                f"got {lang_norm!r}."
+            )
+        if a not in allowed:
+            raise ValueError(f"Unsupported language {a!r}.")
+
+
 def parse_label_language(text: str) -> Optional[str]:
     match = _LABEL_RE.match(text or "")
     if not match:
@@ -88,7 +108,18 @@ def validate_jsonl(
     issues: List[ValidationIssue] = []
     total = 0
     valid_records = 0
-    langs = set(supported_languages or load_supported_languages())
+    allowed: Optional[Set[str]] = None
+    if supported_languages is not None:
+        allowed = set(supported_languages)
+
+    exp_norm = ""
+    exp_raw = (expected_language or "").strip()
+    if exp_raw:
+        try:
+            exp_norm = normalize_language_spec(exp_raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid expected_language / --language: {exc}") from exc
+        _validate_language_spec_against_allowed(exp_norm, allowed)
 
     if not os.path.isfile(path):
         return ValidationReport(
@@ -128,29 +159,43 @@ def validate_jsonl(
                     ValidationIssue(
                         line_no,
                         "invalid_text_format",
-                        "Field 'text' must match 'language {Name}<asr_text>{transcript}'.",
+                        "Field 'text' must match 'language {Name[,Name...]}<asr_text>{transcript}'.",
                     )
                 )
                 record_ok = False
             else:
-                if expected_language and lang != expected_language:
+                try:
+                    lang_norm = normalize_language_spec(lang)
+                except ValueError as exc:
                     issues.append(
                         ValidationIssue(
                             line_no,
-                            "language_mismatch",
-                            f"Expected language {expected_language!r}, got {lang!r}.",
+                            "invalid_language_spec",
+                            f"Invalid language spec in label: {exc}",
                         )
                     )
                     record_ok = False
-                if lang not in langs:
-                    issues.append(
-                        ValidationIssue(
-                            line_no,
-                            "unsupported_language",
-                            f"Unsupported language {lang!r}.",
+                else:
+                    if exp_norm and lang_norm != exp_norm:
+                        issues.append(
+                            ValidationIssue(
+                                line_no,
+                                "language_mismatch",
+                                f"Expected language {exp_norm!r}, got {lang_norm!r}.",
+                            )
                         )
-                    )
-                    record_ok = False
+                        record_ok = False
+                    try:
+                        _validate_language_spec_against_allowed(lang_norm, allowed)
+                    except ValueError as exc:
+                        issues.append(
+                            ValidationIssue(
+                                line_no,
+                                "unsupported_language",
+                                str(exc),
+                            )
+                        )
+                        record_ok = False
 
         if record_ok:
             valid_records += 1
@@ -173,7 +218,11 @@ def report_to_dict(report: ValidationReport) -> Dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Validate Qwen3-ASR finetuning JSONL manifests.")
     p.add_argument("--jsonl", required=True, help="Manifest path to validate.")
-    p.add_argument("--language", default="", help="Expected Qwen3-ASR language label, e.g. Uyghur.")
+    p.add_argument(
+        "--language",
+        default="",
+        help="Expected Qwen3-ASR language label (single or comma-separated), e.g. Uyghur or Chinese,English.",
+    )
     p.add_argument("--check_audio", type=int, default=1, choices=(0, 1), help="Check audio files exist.")
     p.add_argument("--output_report", default="", help="Optional JSON report output path.")
     return p.parse_args()

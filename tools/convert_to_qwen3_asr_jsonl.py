@@ -2,11 +2,15 @@
 # coding=utf-8
 
 import argparse
+import csv
 import json
 import os
 import random
 import re
 from typing import Dict, Iterable, Iterator, List, Optional
+
+
+from qwen_asr.inference.utils import normalize_language_spec, validate_language_spec
 
 
 SPEECH_PATH_RE = re.compile(r"<\|startofspeech\|>!(.*?)<\|endofspeech\|>")
@@ -30,6 +34,18 @@ def parse_args():
     parser.add_argument("--wav_scp", type=str, default="", help="Kaldi-style wav.scp file.")
     parser.add_argument("--text_file", type=str, default="", help="Kaldi-style text file.")
     parser.add_argument("--funasr_jsonl", type=str, default="", help="Fun-ASR-Nano messages jsonl file.")
+    parser.add_argument(
+        "--switchlingua_csv",
+        type=str,
+        default="",
+        help="SwitchLingua-style metadata CSV (columns include file_name, text). Mutually exclusive with other sources.",
+    )
+    parser.add_argument(
+        "--switchlingua_audio_dir",
+        type=str,
+        default="",
+        help="Directory containing audio files named like file_name in the SwitchLingua CSV.",
+    )
     parser.add_argument("--cv_tsv", type=str, default="", help="Common Voice train/dev/test tsv file.")
     parser.add_argument(
         "--cv_clips_dir",
@@ -81,7 +97,7 @@ def parse_args():
         "--language",
         type=str,
         default="None",
-        help="Language prefix to inject into text, e.g. English/Chinese/None.",
+        help="Language prefix to inject into text, e.g. English, Chinese, None, or comma-separated code-switching (Chinese,English).",
     )
     parser.add_argument(
         "--keep_prompt",
@@ -163,6 +179,47 @@ def extract_audio_path_from_user_content(user_content: str) -> str:
     if not match:
         raise ValueError(f"Cannot find speech path in user content: {user_content}")
     return match.group(1).strip()
+
+
+def _clean_switchlingua_transcript(text: str) -> str:
+    """Collapse internal newlines / runs of whitespace for a single-line jsonl transcript."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    return " ".join(t.split())
+
+
+def iter_from_switchlingua_csv(
+    csv_path: str,
+    audio_dir: str,
+    language: str,
+) -> Iterator[dict]:
+    """
+    Read SwitchLingua-style CSV: ``file_name`` (audio basename), ``text`` (reference transcript).
+
+    Audio paths are ``os.path.join(audio_dir, file_name)``.
+    """
+    if not os.path.isfile(csv_path):
+        raise ValueError(f"SwitchLingua CSV not found: {csv_path}")
+    if not os.path.isdir(audio_dir):
+        raise ValueError(f"SwitchLingua audio dir not found: {audio_dir}")
+    audio_root = os.path.abspath(audio_dir)
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if "file_name" not in reader.fieldnames or "text" not in reader.fieldnames:
+            raise ValueError(
+                f"SwitchLingua CSV must have columns 'file_name' and 'text'; got {reader.fieldnames!r}"
+            )
+        for line_no, row in enumerate(reader, start=2):
+            fn = (row.get("file_name") or "").strip()
+            transcript = _clean_switchlingua_transcript(row.get("text") or "")
+            if not fn or not transcript:
+                continue
+            audio_abs = os.path.abspath(os.path.join(audio_root, fn))
+            yield {
+                "audio": audio_abs,
+                "text": normalize_target_text(transcript, language),
+            }
 
 
 def iter_from_funasr_jsonl(
@@ -344,26 +401,39 @@ def iter_from_cv_multilingual_corpus(
 
 def main():
     args = parse_args()
+    try:
+        language = normalize_language_spec(args.language.strip())
+        validate_language_spec(language)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --language: {exc}") from exc
 
     use_kaldi = bool(args.wav_scp or args.text_file)
     use_funasr_jsonl = bool(args.funasr_jsonl)
     use_cv_tsv = bool(args.cv_tsv)
     use_cv_multilingual = bool(args.cv_multilingual_root.strip())
+    use_switchlingua = bool(args.switchlingua_csv.strip())
 
-    source_modes = int(use_kaldi) + int(use_funasr_jsonl) + int(use_cv_tsv) + int(use_cv_multilingual)
+    source_modes = (
+        int(use_kaldi)
+        + int(use_funasr_jsonl)
+        + int(use_cv_tsv)
+        + int(use_cv_multilingual)
+        + int(use_switchlingua)
+    )
     if source_modes != 1:
         raise ValueError(
-            "Provide exactly one source mode: Kaldi, FunASR jsonl, Common Voice tsv, or Common Voice multilingual root."
+            "Provide exactly one source mode: Kaldi, FunASR jsonl, Common Voice tsv, "
+            "Common Voice multilingual root, or SwitchLingua CSV."
         )
 
     if use_kaldi:
         if not args.wav_scp or not args.text_file:
             raise ValueError("Both --wav_scp and --text_file are required for Kaldi-style conversion.")
-        records = iter_from_wav_and_text(args.wav_scp, args.text_file, args.language)
+        records = iter_from_wav_and_text(args.wav_scp, args.text_file, language)
     elif use_funasr_jsonl:
         records = iter_from_funasr_jsonl(
             args.funasr_jsonl,
-            language=args.language,
+            language=language,
             keep_prompt=bool(args.keep_prompt),
             drop_generic_system_prompt=bool(args.drop_generic_system_prompt),
         )
@@ -372,7 +442,7 @@ def main():
         records = iter_from_common_voice_tsv(
             args.cv_tsv,
             clips_dir=clips_dir,
-            language=args.language,
+            language=language,
             max_samples=args.max_samples,
         )
     elif use_cv_multilingual:
@@ -389,6 +459,14 @@ def main():
             language_labels,
             balance_cap_locale=args.cv_balance_cap_locale,
             balance_seed=args.cv_balance_seed,
+        )
+    elif use_switchlingua:
+        if not args.switchlingua_audio_dir.strip():
+            raise ValueError("--switchlingua_audio_dir is required when using --switchlingua_csv.")
+        records = iter_from_switchlingua_csv(
+            os.path.abspath(args.switchlingua_csv.strip()),
+            os.path.abspath(args.switchlingua_audio_dir.strip()),
+            language,
         )
     else:
         raise ValueError("Invalid source mode.")

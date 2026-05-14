@@ -23,6 +23,38 @@ class PipelineToolsTest(unittest.TestCase):
             self.assertEqual(report.valid_records, 1)
             self.assertEqual(report.issues, [])
 
+    def test_validate_jsonl_accepts_codeswitch_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            audio = os.path.join(td, "a.wav")
+            manifest = os.path.join(td, "train.jsonl")
+            open(audio, "wb").close()
+            with open(manifest, "w", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {"audio": audio, "text": "language Chinese,English<asr_text>hello 你好"}
+                    )
+                    + "\n"
+                )
+
+            report = validate_jsonl(manifest, expected_language="chinese, english", check_audio=True)
+
+            self.assertTrue(report.valid)
+            self.assertEqual(report.valid_records, 1)
+
+    def test_validate_jsonl_rejects_codeswitch_unsupported_atom(self):
+        with tempfile.TemporaryDirectory() as td:
+            audio = os.path.join(td, "a.wav")
+            manifest = os.path.join(td, "train.jsonl")
+            open(audio, "wb").close()
+            with open(manifest, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"audio": audio, "text": "language Chinese,Klingon<asr_text>x"}) + "\n")
+
+            report = validate_jsonl(manifest, expected_language="", check_audio=True)
+
+            self.assertFalse(report.valid)
+            codes = {issue.code for issue in report.issues}
+            self.assertIn("unsupported_language", codes)
+
     def test_validate_jsonl_rejects_bad_language_and_missing_audio(self):
         with tempfile.TemporaryDirectory() as td:
             manifest = os.path.join(td, "train.jsonl")

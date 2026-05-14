@@ -1,0 +1,39 @@
+# SwitchLingua Cantonese–English code-switching (CSV + m4a under one directory).
+# `dataset.language` may be Cantonese,English; manifests use canonical order per SUPPORTED_LANGUAGES (English,Cantonese).
+
+run_name: switchlingua_yue_en_sft
+
+dataset:
+  source_type: switchlingua_csv
+  language: Cantonese,English
+  source: /root/autodl-tmp/workspace/dataset/SwitchLingua_audio/Cantonese.csv
+  switchlingua_audio_dir: /root/autodl-tmp/workspace/dataset/SwitchLingua_audio/Cantonese
+  output_dir: data/switchlingua/cantonese_english
+  check_audio: 1
+  split_seed: 42
+  train_ratio: 0.9
+  dev_ratio: 0.05
+  # max_samples: 512  # optional cap for smoke tests; omit or 0 for full CSV
+
+training:
+  model_path: Qwen/Qwen3-ASR-1.7B
+  output_dir: outputs/switchlingua_cantonese_en_sft
+  batch_size: 2
+  grad_acc: 8
+  lr: 2e-5
+  epochs: 1
+  save_steps: 400
+  save_total_limit: 2
+  log_steps: 50
+  sr: 16000
+
+evaluation:
+  eval_script: evaluation/cantonese/eval_cantonese_asr_jsonl.py
+  language: English,Cantonese
+  batch_size: 2
+  max_samples: 0
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  dry_run: false

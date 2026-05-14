@@ -35,7 +35,7 @@ Example:
 ```jsonl
 {"audio":"/data/wavs/utt0001.wav","text":"language English<asr_text>This is a test sentence."}
 {"audio":"/data/wavs/utt0002.wav","text":"language English<asr_text>Another example."}
-{"audio":"/data/wavs/utt0003.wav","text":"language English<asr_text>Fine-tuning data line."}
+{"audio":"/data/wavs/utt0004.wav","text":"language Chinese,English<asr_text>hello 你好"}
 ```
 
 Language prefix recommendation:
@@ -43,6 +43,7 @@ Language prefix recommendation:
 - If you **have** language info, use:
   - `language English<asr_text>...`
   - `language Chinese<asr_text>...`
+  - For **code-switching** (multiple known languages in one utterance), use a comma-separated list (no spaces around commas required, but each name must be a supported atomic language), e.g. `language Chinese,English<asr_text>...`. The converter and inference layer **canonicalize** multi-language labels to the same comma order as in `SUPPORTED_LANGUAGES` in `qwen_asr/inference/utils.py` (e.g. `English,Chinese` becomes `Chinese,English`).
 - If you **do not have** language info, use:
   - `language None<asr_text>...`
 

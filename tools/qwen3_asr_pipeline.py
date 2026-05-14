@@ -232,8 +232,23 @@ def _convert_command(
         cmd.extend(["--wav_scp", abspath(wav_scp), "--text_file", abspath(text_file)])
     elif source_type == "funasr_jsonl":
         cmd.extend(["--funasr_jsonl", abspath(source_path)])
+    elif source_type == "switchlingua_csv":
+        audio_dir = str(dataset.get("switchlingua_audio_dir") or "").strip()
+        if not audio_dir:
+            raise ValueError("dataset.switchlingua_audio_dir is required when source_type is switchlingua_csv.")
+        cmd.extend(
+            [
+                "--switchlingua_csv",
+                abspath(source_path),
+                "--switchlingua_audio_dir",
+                abspath(audio_dir),
+            ]
+        )
     else:
         raise ValueError(f"Unsupported dataset.source_type: {source_type!r}")
+    max_s = dataset.get("max_samples")
+    if max_s is not None and int(max_s) > 0:
+        cmd.extend(["--max_samples", str(int(max_s))])
     return cmd
 
 
