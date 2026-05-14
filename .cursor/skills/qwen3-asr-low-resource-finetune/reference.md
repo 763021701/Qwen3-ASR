@@ -26,6 +26,7 @@
 
 ## 已有转换脚本（可抄结构）
 
+- `tools/convert_to_qwen3_asr_jsonl.py`（训练/微调数据通用转换器；pipeline prepare 阶段默认调用）
 - `evaluation/chinese/wsc/prepare_wsc_eval_qwen3.py`（WSC / 四川话，非粤语）
 - `evaluation/cantonese/wsyue_asr/prepare_wsyue_asr_eval_qwen3.py`
 

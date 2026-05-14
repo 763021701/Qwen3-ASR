@@ -54,7 +54,9 @@ python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage all --dry_run 1
 
 ## 新数据集：转换脚本写法
 
-当没有现成 `prepare_*` 覆盖该语料时，**由 agent 新建脚本**（建议路径 `evaluation/<language>/<dataset>/prepare_<dataset>_qwen3.py` 或 `data/scripts/prepare_<dataset>_qwen3.py`），要求：
+训练/微调数据转换优先复用或扩展顶层 `tools/convert_to_qwen3_asr_jsonl.py`，因为它由 `tools/qwen3_asr_pipeline.py --stage prepare` 调用，覆盖 Common Voice、Kaldi `wav.scp + text`、FunASR JSONL 等通用来源。
+
+当新语料无法用通用转换器表达时，**由 agent 扩展 `tools/convert_to_qwen3_asr_jsonl.py` 或在 `tools/` 下新建通用转换脚本**；只有评测集专用、带下载/子集/去重等 benchmark 规则的 prepare 脚本，才放在 `evaluation/<language>/<dataset>/prepare_<dataset>_qwen3.py`。要求：
 
 1. 使用 `argparse`，参数至少包含：`--output_jsonl`、`--dataset_dir`（或等价根路径）、`--language`、`--max_samples`（0 表示全量）。
 2. 逐行写出 JSON：`json.dumps({"audio": abs_path, "text": supervised}, ensure_ascii=False)`，文件 **UTF-8**。
