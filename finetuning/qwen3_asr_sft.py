@@ -15,12 +15,14 @@
 # limitations under the License.
 import argparse
 import os
+import random
 import re
 import shutil
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import librosa
+import numpy as np
 import torch
 from datasets import load_dataset
 from qwen_asr import Qwen3ASRModel
@@ -111,10 +113,150 @@ def make_preprocess_fn_prefix_only(processor):
     return _preprocess
 
 
+def _parse_float_list(value: str, default: Tuple[float, ...]) -> Tuple[float, ...]:
+    raw = (value or "").strip()
+    if not raw:
+        return default
+    return tuple(float(x.strip()) for x in raw.split(",") if x.strip())
+
+
+@dataclass
+class AudioAugmentConfig:
+    """Optional online augmentation for training only."""
+
+    enabled: bool = False
+    augment_prob: float = 1.0
+    speed_prob: float = 0.5
+    speed_factors: Tuple[float, ...] = (0.9, 1.0, 1.1)
+    noise_prob: float = 0.5
+    noise_snr_min: float = 5.0
+    noise_snr_max: float = 20.0
+    specaug_prob: float = 0.5
+    specaug_time_mask_param: int = 50
+    specaug_freq_mask_param: int = 27
+    specaug_num_time_masks: int = 2
+    specaug_num_freq_masks: int = 2
+
+    _specaug_masks: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self):
+        if not self.enabled:
+            return
+        try:
+            import torchaudio
+        except ImportError as e:
+            raise ImportError(
+                "Audio augmentation requires torchaudio. Install a build matching your PyTorch, e.g.: "
+                "pip install --no-deps 'torchaudio==2.8.0+cu128' "
+                "--index-url https://download.pytorch.org/whl/cu128"
+            ) from e
+        self._specaug_masks = _build_specaug_transforms(self)
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "AudioAugmentConfig":
+        return cls(
+            enabled=bool(getattr(args, "augment", 0)),
+            augment_prob=float(getattr(args, "augment_prob", 1.0)),
+            speed_prob=float(getattr(args, "speed_prob", 0.5)),
+            speed_factors=_parse_float_list(
+                getattr(args, "speed_factors", ""), (0.9, 1.0, 1.1)
+            ),
+            noise_prob=float(getattr(args, "noise_prob", 0.5)),
+            noise_snr_min=float(getattr(args, "noise_snr_min", 5.0)),
+            noise_snr_max=float(getattr(args, "noise_snr_max", 20.0)),
+            specaug_prob=float(getattr(args, "specaug_prob", 0.5)),
+            specaug_time_mask_param=int(getattr(args, "specaug_time_mask_param", 50)),
+            specaug_freq_mask_param=int(getattr(args, "specaug_freq_mask_param", 27)),
+            specaug_num_time_masks=int(getattr(args, "specaug_num_time_masks", 2)),
+            specaug_num_freq_masks=int(getattr(args, "specaug_num_freq_masks", 2)),
+        )
+
+
+def _build_specaug_transforms(cfg: AudioAugmentConfig):
+    import torchaudio
+
+    time_masks = [
+        torchaudio.transforms.TimeMasking(cfg.specaug_time_mask_param)
+        for _ in range(cfg.specaug_num_time_masks)
+    ]
+    freq_masks = [
+        torchaudio.transforms.FrequencyMasking(cfg.specaug_freq_mask_param)
+        for _ in range(cfg.specaug_num_freq_masks)
+    ]
+    return time_masks, freq_masks
+
+
+def apply_speed_perturbation(wav: np.ndarray, sr: int, factor: float) -> np.ndarray:
+    """Change playback speed via resample (factor>1 faster/shorter, factor<1 slower/longer)."""
+    if factor == 1.0:
+        return wav
+    import torchaudio
+
+    w = torch.from_numpy(wav).float().unsqueeze(0)
+    # factor>1 => faster => fewer samples when interpreted at ``sr``
+    new_sr = max(1, int(round(sr / factor)))
+    out = torchaudio.functional.resample(w, sr, new_sr)
+    return out.squeeze(0).numpy().astype(np.float32)
+
+
+def apply_add_noise(wav: np.ndarray, snr_db: float) -> np.ndarray:
+    """Mix synthetic white noise at the given SNR (dB)."""
+    signal = torch.from_numpy(wav).float()
+    noise = torch.randn_like(signal)
+    signal_power = signal.pow(2).mean().clamp(min=1e-10)
+    noise_power = noise.pow(2).mean().clamp(min=1e-10)
+    snr_linear = 10 ** (snr_db / 10.0)
+    scale = torch.sqrt(signal_power / (noise_power * snr_linear))
+    mixed = signal + noise * scale
+    peak = mixed.abs().max()
+    if peak > 1.0:
+        mixed = mixed / peak
+    return mixed.numpy().astype(np.float32)
+
+
+def augment_waveform(
+    wav: np.ndarray, sr: int, cfg: AudioAugmentConfig, rng: random.Random
+) -> np.ndarray:
+    if not cfg.enabled or rng.random() > cfg.augment_prob:
+        return wav
+    out = wav.astype(np.float32, copy=False)
+    if rng.random() < cfg.speed_prob:
+        factor = rng.choice(cfg.speed_factors)
+        out = apply_speed_perturbation(out, sr, factor)
+    if rng.random() < cfg.noise_prob:
+        lo, hi = cfg.noise_snr_min, cfg.noise_snr_max
+        snr = rng.uniform(min(lo, hi), max(lo, hi))
+        out = apply_add_noise(out, snr)
+    return out
+
+
+def apply_specaugment(features: torch.Tensor, cfg: AudioAugmentConfig, rng: random.Random) -> torch.Tensor:
+    """Mask mel features; expects shape (batch, n_mels, time) or (n_mels, time)."""
+    if not cfg.enabled or cfg._specaug_masks is None or rng.random() > cfg.specaug_prob:
+        return features
+    time_masks, freq_masks = cfg._specaug_masks
+    out = features.clone()
+    if out.dim() == 2:
+        for fm in freq_masks:
+            out = fm(out)
+        for tm in time_masks:
+            out = tm(out)
+        return out
+    for i in range(out.size(0)):
+        sample = out[i]
+        for fm in freq_masks:
+            sample = fm(sample)
+        for tm in time_masks:
+            sample = tm(sample)
+        out[i] = sample
+    return out
+
+
 @dataclass
 class DataCollatorForQwen3ASRFinetuning:
     processor: Any
     sampling_rate: int = 16000
+    augment: Optional[AudioAugmentConfig] = None
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_paths = [f["audio"] for f in features]
@@ -123,7 +265,17 @@ class DataCollatorForQwen3ASRFinetuning:
 
         eos = self.processor.tokenizer.eos_token or ""
         full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
-        audios = [load_audio(p, sr=self.sampling_rate) for p in audio_paths]
+
+        cfg = self.augment
+        use_aug = cfg is not None and cfg.enabled
+        rng = random.Random() if use_aug else None
+
+        audios = []
+        for p in audio_paths:
+            wav = load_audio(p, sr=self.sampling_rate)
+            if use_aug:
+                wav = augment_waveform(wav, self.sampling_rate, cfg, rng)
+            audios.append(wav)
 
         full_inputs = self.processor(
             text=full_texts,
@@ -140,6 +292,11 @@ class DataCollatorForQwen3ASRFinetuning:
             truncation=False,
         )
 
+        if use_aug and "input_features" in full_inputs:
+            full_inputs["input_features"] = apply_specaugment(
+                full_inputs["input_features"], cfg, rng
+            )
+
         prefix_lens = prefix_inputs["attention_mask"].sum(dim=1).tolist()
         labels = full_inputs["input_ids"].clone()
         for i, pl in enumerate(prefix_lens):
@@ -154,6 +311,10 @@ class DataCollatorForQwen3ASRFinetuning:
 
 
 class CastFloatInputsTrainer(Trainer):
+    def __init__(self, *args, eval_data_collator=None, **kwargs):
+        self.eval_data_collator = eval_data_collator
+        super().__init__(*args, **kwargs)
+
     def _prepare_inputs(self, inputs):
         inputs = super()._prepare_inputs(inputs)
         model_dtype = getattr(self.model, "dtype", None)
@@ -162,6 +323,16 @@ class CastFloatInputsTrainer(Trainer):
                 if torch.is_tensor(v) and v.is_floating_point():
                     inputs[k] = v.to(dtype=model_dtype)
         return inputs
+
+    def get_eval_dataloader(self, eval_dataset=None):
+        if self.eval_data_collator is None:
+            return super().get_eval_dataloader(eval_dataset)
+        original = self.data_collator
+        self.data_collator = self.eval_data_collator
+        try:
+            return super().get_eval_dataloader(eval_dataset)
+        finally:
+            self.data_collator = original
 
 
 def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
@@ -236,6 +407,20 @@ def parse_args():
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--resume", type=int, default=0)
 
+    # Online audio augmentation (train only; default off)
+    p.add_argument("--augment", type=int, default=0, choices=(0, 1))
+    p.add_argument("--augment_prob", type=float, default=1.0)
+    p.add_argument("--speed_prob", type=float, default=0.5)
+    p.add_argument("--speed_factors", type=str, default="0.9,1.0,1.1")
+    p.add_argument("--noise_prob", type=float, default=0.5)
+    p.add_argument("--noise_snr_min", type=float, default=5.0)
+    p.add_argument("--noise_snr_max", type=float, default=20.0)
+    p.add_argument("--specaug_prob", type=float, default=0.5)
+    p.add_argument("--specaug_time_mask_param", type=int, default=50)
+    p.add_argument("--specaug_freq_mask_param", type=int, default=27)
+    p.add_argument("--specaug_num_time_masks", type=int, default=2)
+    p.add_argument("--specaug_num_freq_masks", type=int, default=2)
+
     return p.parse_args()
 
 
@@ -272,7 +457,17 @@ def main():
         if drop:
             ds[split] = ds[split].remove_columns(drop)
 
-    collator = DataCollatorForQwen3ASRFinetuning(processor=processor, sampling_rate=args_cli.sr)
+    augment_cfg = AudioAugmentConfig.from_args(args_cli)
+    train_collator = DataCollatorForQwen3ASRFinetuning(
+        processor=processor,
+        sampling_rate=args_cli.sr,
+        augment=augment_cfg if augment_cfg.enabled else None,
+    )
+    eval_collator = DataCollatorForQwen3ASRFinetuning(
+        processor=processor,
+        sampling_rate=args_cli.sr,
+        augment=None,
+    )
 
     training_args = TrainingArguments(
         output_dir=args_cli.output_dir,
@@ -291,8 +486,8 @@ def main():
         save_steps=args_cli.save_steps,
         save_total_limit=args_cli.save_total_limit,
         save_safetensors=True,
-        eval_strategy="steps",
-        eval_steps=args_cli.save_steps,
+        eval_strategy="steps" if args_cli.eval_file else "no",
+        eval_steps=args_cli.save_steps if args_cli.eval_file else None,
         do_eval=bool(args_cli.eval_file),
         bf16=use_bf16,
         fp16=not use_bf16,
@@ -306,10 +501,17 @@ def main():
         args=training_args,
         train_dataset=ds["train"],
         eval_dataset=ds.get("validation", None),
-        data_collator=collator,
+        data_collator=train_collator,
+        eval_data_collator=eval_collator if args_cli.eval_file else None,
         tokenizer=processor.tokenizer,
         callbacks=[MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)],
     )
+
+    if trainer.args.process_index == 0 and augment_cfg.enabled:
+        print(
+            "[augment] enabled: speed_prob=%s noise_prob=%s specaug_prob=%s"
+            % (augment_cfg.speed_prob, augment_cfg.noise_prob, augment_cfg.specaug_prob)
+        )
 
     resume_from = (args_cli.resume_from or "").strip()
     if not resume_from and args_cli.resume == 1:

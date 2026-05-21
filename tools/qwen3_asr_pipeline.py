@@ -352,6 +352,18 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "prefetch_factor": "--prefetch_factor",
         "resume_from": "--resume_from",
         "resume": "--resume",
+        "augment": "--augment",
+        "augment_prob": "--augment_prob",
+        "speed_prob": "--speed_prob",
+        "speed_factors": "--speed_factors",
+        "noise_prob": "--noise_prob",
+        "noise_snr_min": "--noise_snr_min",
+        "noise_snr_max": "--noise_snr_max",
+        "specaug_prob": "--specaug_prob",
+        "specaug_time_mask_param": "--specaug_time_mask_param",
+        "specaug_freq_mask_param": "--specaug_freq_mask_param",
+        "specaug_num_time_masks": "--specaug_num_time_masks",
+        "specaug_num_freq_masks": "--specaug_num_freq_masks",
     }
     cmd.extend(["--train_file", paths["train"], "--eval_file", paths["dev"], "--output_dir", output_dir])
     for key, flag in option_map.items():

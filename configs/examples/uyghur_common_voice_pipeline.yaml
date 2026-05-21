@@ -22,6 +22,15 @@ training:
   save_total_limit: 3
   log_steps: 20
   sr: 16000
+  # Optional online augmentation (train only; eval unchanged):
+  # augment: 1
+  # augment_prob: 1.0
+  # speed_prob: 0.5
+  # speed_factors: "0.9,1.0,1.1"
+  # noise_prob: 0.5
+  # noise_snr_min: 5.0
+  # noise_snr_max: 20.0
+  # specaug_prob: 0.5
 
 evaluation:
   eval_script: evaluation/uyghur/eval_uyghur_asr_jsonl.py
