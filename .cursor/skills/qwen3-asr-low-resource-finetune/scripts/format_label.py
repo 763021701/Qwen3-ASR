@@ -3,10 +3,14 @@
 """
 Build the Qwen3-ASR supervised `text` field for one transcript line.
 
+Does NOT normalize transcript body (punctuation, case, numbers, etc.). Before calling
+this helper, normalize raw text per docs/normalize_label.md (see skill
+qwen3-asr-low-resource-finetune).
+
 Use from shell for quick checks, or import `qwen3_asr_supervised_text` in dataset prep scripts.
 
 Example:
-  python scripts/format_label.py --language Uyghur --transcript "بىر مىسال"
+  python scripts/format_label.py --language English --transcript "hello world"
 """
 
 from __future__ import annotations

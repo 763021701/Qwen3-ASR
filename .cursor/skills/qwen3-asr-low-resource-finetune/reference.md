@@ -6,6 +6,31 @@
 
 推理侧 `validate_language` / `validate_language_spec` 会拒绝不在 `SUPPORTED_LANGUAGES` 中的原子语言名。训练数据中的 `language {Name}` 或 `language {Name,Name,...}` 中，**每个**原子名应与该列表一致。多语混说时，`normalize_language_spec` 会按 **`SUPPORTED_LANGUAGES` 在 `utils.py` 中的定义顺序**对多个原子重排，使 `English,Chinese` 与 `Chinese,English` 等写法在推理与校验中一致。`SUPPORTED_LANGUAGES` 仅为原子语言列表，不包含 `Chinese,English` 这类组合字符串。
 
+## 标签规范化（`docs/normalize_label.md`）
+
+**权威手册**：仓库根目录 `docs/normalize_label.md`。Agent 在编写 `tools/prepare_*.py`、`tools/convert_to_qwen3_asr_jsonl.py` 扩展或任何产出 jsonl 的脚本前，必须先读该文件并按语种实现正文清洗。
+
+**与现有代码的分工**：
+
+| 步骤 | 负责方 | 说明 |
+|------|--------|------|
+| 转写正文 normalize | 转换脚本（按手册） | 去标点、空白、数字策略等，作用在 `<asr_text>` 之前 |
+| `language` 前缀 | `normalize_language_spec` / `format_label.py` | 只规范语言标签，不改正文 |
+| 训练 collator | `finetuning/qwen3_asr_sft.py` | 整条 `text` 作 target，不再二次 normalize |
+| 评测打分 | `evaluation/*/eval_*_jsonl.py` | 可能有独立的 `normalize_for_scoring`；**训练 jsonl 仍应遵循手册**，不要指望 eval 侧规则补训练缺口 |
+
+**语种 → 手册章节**：`English` → ENGLISH；`Chinese` → MANDARIN；`Cantonese` → CANTONESE。混说标签（如 `Chinese,English`）需与用户确认句内策略。手册未覆盖的 `SUPPORTED_LANGUAGES` 条目：先问用户，至少遵守 GLOBAL RULES。
+
+**实现检查清单**（写脚本时自检）：
+
+- [ ] 已读 `docs/normalize_label.md` 全文
+- [ ] train / dev / test 共用同一 normalize 函数
+- [ ] normalize 后空串丢弃并写入 report 计数
+- [ ] 数字、繁简、撇号等策略在 argparse 或配置里可复现、有默认值说明
+- [ ] 最终 `text` = `language {spec}<asr_text>{normalized_body}`
+
+**注意**：`tools/convert_to_qwen3_asr_jsonl.py` 里的 `normalize_target_text` **仅** `strip` + 拼前缀；SwitchLingua 源另有 `_clean_switchlingua_transcript`（仅压空白）。新语料不要复制「只 strip」当完整 normalize。
+
 ## 微调脚本与语料解耦
 
 `finetuning/qwen3_asr_sft.py` 将每条样本的整条 `text` 作为 `target`（在 chat prefix 之后预测）。因此 **不要** 在 jsonl 里只存裸转写而不带 `language …<asr_text>` 前缀（除非用户明确要改 collator 逻辑，本仓库默认不支持）。
