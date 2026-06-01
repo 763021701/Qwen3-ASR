@@ -421,6 +421,16 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "specaug_freq_mask_param": "--specaug_freq_mask_param",
         "specaug_num_time_masks": "--specaug_num_time_masks",
         "specaug_num_freq_masks": "--specaug_num_freq_masks",
+        "use_lora": "--use_lora",
+        "lora_scope": "--lora_scope",
+        "lora_r": "--lora_r",
+        "lora_alpha": "--lora_alpha",
+        "lora_dropout": "--lora_dropout",
+        "lora_bias": "--lora_bias",
+        "merge_lora_into_base_from": "--merge_lora_into_base_from",
+        "lr_encoder": "--lr_encoder",
+        "lr_aligner": "--lr_aligner",
+        "lr_llm": "--lr_llm",
     }
     cmd.extend(["--train_file", paths["train"], "--eval_file", paths["dev"], "--output_dir", output_dir])
     for key, flag in option_map.items():

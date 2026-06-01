@@ -29,6 +29,25 @@ from qwen_asr import Qwen3ASRModel
 from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
 
+LORA_TARGETS = {
+    "encoder": r"^audio_tower\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$",
+    "aligner": r"^audio_tower\.(conv_out|proj1|proj2)$",
+    "encoder_aligner": (
+        r"^(audio_tower\.(conv_out|proj1|proj2)$"
+        r"|audio_tower\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$)"
+    ),
+    "encoder_b4_aligner": (
+        r"^(audio_tower\.(conv_out|proj1|proj2)$"
+        r"|audio_tower\.layers\.(20|21|22|23)\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$)"
+    ),
+    "llm": r"^model\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
+    "all": (
+        r"^(audio_tower\.(conv_out|proj1|proj2)$"
+        r"|audio_tower\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$"
+        r"|model\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$)"
+    ),
+}
+
 
 def patch_outer_forward(model):
     cls = model.__class__
@@ -61,6 +80,42 @@ def patch_outer_forward(model):
 
     cls.forward = forward
     cls._forward_patched = True
+
+
+def apply_lora(model, args) -> bool:
+    """Wrap model.thinker with PEFT LoRA. Returns True if LoRA was applied."""
+    if not getattr(args, "use_lora", 0):
+        return False
+
+    from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+
+    old_lora = str(getattr(args, "merge_lora_into_base_from", "") or "").strip()
+    if old_lora:
+        if getattr(args, "resume", 0) or str(getattr(args, "resume_from", "") or "").strip():
+            raise ValueError("Do not use --merge_lora_into_base_from with --resume or --resume_from.")
+        print(f"[merge_lora] merging previous LoRA from: {old_lora}")
+        model.thinker = PeftModel.from_pretrained(
+            model.thinker, old_lora, is_trainable=False
+        ).merge_and_unload()
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    scope = getattr(args, "lora_scope", "encoder_aligner")
+    if scope not in LORA_TARGETS:
+        raise ValueError(f"Unknown lora_scope {scope!r}. Choices: {list(LORA_TARGETS)}")
+
+    lora_config = LoraConfig(
+        r=int(getattr(args, "lora_r", 8)),
+        lora_alpha=int(getattr(args, "lora_alpha", 16)),
+        lora_dropout=float(getattr(args, "lora_dropout", 0.05)),
+        bias=str(getattr(args, "lora_bias", "none")),
+        task_type=TaskType.CAUSAL_LM,
+        target_modules=LORA_TARGETS[scope],
+    )
+    model.thinker = get_peft_model(model.thinker, lora_config)
+    model.thinker.print_trainable_parameters()
+    return True
 
 
 def freeze_audio_tower(model) -> None:
@@ -325,8 +380,12 @@ class DataCollatorForQwen3ASRFinetuning:
 
 
 class CastFloatInputsTrainer(Trainer):
-    def __init__(self, *args, eval_data_collator=None, **kwargs):
+    def __init__(self, *args, eval_data_collator=None, lr_encoder=2e-5, lr_aligner=2e-5,
+                 lr_llm=2e-5, **kwargs):
         self.eval_data_collator = eval_data_collator
+        self.lr_encoder = lr_encoder
+        self.lr_aligner = lr_aligner
+        self.lr_llm = lr_llm
         super().__init__(*args, **kwargs)
 
     def _prepare_inputs(self, inputs):
@@ -347,6 +406,66 @@ class CastFloatInputsTrainer(Trainer):
             return super().get_eval_dataloader(eval_dataset)
         finally:
             self.data_collator = original
+
+    def save_model(self, output_dir=None, _internal_call=False):
+        output_dir = output_dir or self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        thinker = self.model.thinker
+        if hasattr(thinker, "save_pretrained"):
+            thinker.save_pretrained(output_dir, safe_serialization=True)
+        else:
+            super().save_model(output_dir, _internal_call)
+
+    def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+        model = model or self.model
+        adapter_path = os.path.join(resume_from_checkpoint, "adapter_model.safetensors")
+        if os.path.isfile(adapter_path):
+            from safetensors.torch import load_file as safe_load_file
+            model.thinker.load_state_dict(safe_load_file(adapter_path), strict=False)
+            return
+        return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+
+    @staticmethod
+    def _lora_group(name: str) -> str:
+        """Group a parameter name into encoder / aligner / llm / other for per-module LR."""
+        if "lora_" not in name:
+            return "other"
+        if any(x in name for x in ["audio_tower.conv_out", "audio_tower.proj1", "audio_tower.proj2"]):
+            return "aligner"
+        if "audio_tower.layers." in name:
+            return "encoder"
+        if "model.layers." in name and "audio_tower.layers." not in name:
+            return "llm"
+        return "other"
+
+    def create_optimizer(self):
+        if self.optimizer is not None:
+            return self.optimizer
+
+        groups: Dict[str, list] = {"encoder": [], "aligner": [], "llm": [], "other": []}
+        for n, p in self.model.named_parameters():
+            if p.requires_grad:
+                groups[self._lora_group(n)].append(p)
+
+        lrs = {"encoder": self.lr_encoder, "aligner": self.lr_aligner,
+               "llm": self.lr_llm, "other": self.args.learning_rate}
+        optim_groups = [
+            {"params": params, "lr": lrs[name], "weight_decay": self.args.weight_decay}
+            for name, params in groups.items() if params
+        ]
+
+        if self.args.process_index == 0:
+            for name, params in groups.items():
+                if params:
+                    print("[optimizer] %-7s: %d params  lr=%.1e"
+                          % (name, sum(p.numel() for p in params), lrs[name]))
+
+        self.optimizer = torch.optim.AdamW(
+            optim_groups,
+            betas=(self.args.adam_beta1, self.args.adam_beta2),
+            eps=self.args.adam_epsilon,
+        )
+        return self.optimizer
 
 
 def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
@@ -463,6 +582,24 @@ def parse_args():
     p.add_argument("--specaug_num_time_masks", type=int, default=2)
     p.add_argument("--specaug_num_freq_masks", type=int, default=2)
 
+    # LoRA (default off)
+    p.add_argument("--use_lora", type=int, default=0, choices=(0, 1))
+    p.add_argument("--lora_scope", type=str, default="encoder_aligner",
+                   choices=["encoder", "aligner", "encoder_aligner",
+                            "encoder_b4_aligner", "llm", "all"])
+    p.add_argument("--lora_r", type=int, default=8)
+    p.add_argument("--lora_alpha", type=int, default=16)
+    p.add_argument("--lora_dropout", type=float, default=0.05)
+    p.add_argument("--lora_bias", type=str, default="none")
+    p.add_argument("--merge_lora_into_base_from", type=str, default="",
+                   help="Path to a previous LoRA adapter to merge into base model before training a new LoRA stage.")
+    p.add_argument("--lr_encoder", type=float, default=2e-5,
+                   help="Learning rate for speech encoder LoRA params (per-module LR).")
+    p.add_argument("--lr_aligner", type=float, default=2e-5,
+                   help="Learning rate for audio-text aligner LoRA params (per-module LR).")
+    p.add_argument("--lr_llm", type=float, default=2e-5,
+                   help="Learning rate for LLM LoRA params (per-module LR).")
+
     return p.parse_args()
 
 
@@ -492,6 +629,11 @@ def main():
             "audio_tower_total=%d audio_tower_trainable=%d"
             % (total, trainable, audio_total, audio_trainable)
         )
+
+    use_lora = apply_lora(model, args_cli)
+    if use_lora:
+        print("[lora] scope=%s r=%d alpha=%d dropout=%s"
+              % (args_cli.lora_scope, args_cli.lora_r, args_cli.lora_alpha, args_cli.lora_dropout))
 
     raw_ds = load_dataset(
         "json",
@@ -560,6 +702,9 @@ def main():
         eval_data_collator=eval_collator if args_cli.eval_file else None,
         tokenizer=processor.tokenizer,
         callbacks=callbacks,
+        lr_encoder=args_cli.lr_encoder,
+        lr_aligner=args_cli.lr_aligner,
+        lr_llm=args_cli.lr_llm,
     )
 
     if trainer.args.process_index == 0 and augment_cfg.enabled:
