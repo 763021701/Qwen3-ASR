@@ -63,6 +63,20 @@ def patch_outer_forward(model):
     cls._forward_patched = True
 
 
+def freeze_audio_tower(model) -> None:
+    if not hasattr(model, "thinker") or not hasattr(model.thinker, "audio_tower"):
+        raise RuntimeError("Cannot freeze audio tower: model.thinker.audio_tower not found.")
+    audio_tower = model.thinker.audio_tower
+    audio_tower.requires_grad_(False)
+    audio_tower.eval()
+
+
+def count_parameters(module) -> Tuple[int, int]:
+    total = sum(p.numel() for p in module.parameters())
+    trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+    return total, trainable
+
+
 _CKPT_RE = re.compile(r"^checkpoint-(\d+)$")
 
 
@@ -371,6 +385,27 @@ class MakeEveryCheckpointInferableCallback(TrainerCallback):
         return control
 
 
+class KeepAudioTowerFrozenCallback(TrainerCallback):
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        self._freeze(model)
+        return control
+
+    def on_step_begin(self, args, state, control, model=None, **kwargs):
+        self._freeze(model)
+        return control
+
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        self._freeze(model)
+        return control
+
+    @staticmethod
+    def _freeze(model) -> None:
+        if model is None or not hasattr(model, "thinker") or not hasattr(model.thinker, "audio_tower"):
+            return
+        model.thinker.audio_tower.requires_grad_(False)
+        model.thinker.audio_tower.eval()
+
+
 def parse_args():
     p = argparse.ArgumentParser("Qwen3-ASR Finetuning")
 
@@ -391,6 +426,13 @@ def parse_args():
     p.add_argument("--log_steps", type=int, default=10)
     p.add_argument("--lr_scheduler_type", type=str, default="linear")
     p.add_argument("--warmup_ratio", type=float, default=0.02)
+    p.add_argument(
+        "--freeze_audio_tower",
+        type=int,
+        default=0,
+        choices=(0, 1),
+        help="Freeze model.thinker.audio_tower and train only text/LLM-side parameters.",
+    )
 
     # DataLoader
     p.add_argument("--num_workers", type=int, default=4)
@@ -441,6 +483,15 @@ def main():
 
     patch_outer_forward(model)
     model.generation_config = GenerationConfig.from_model_config(model.config)
+    if args_cli.freeze_audio_tower == 1:
+        freeze_audio_tower(model)
+        total, trainable = count_parameters(model)
+        audio_total, audio_trainable = count_parameters(model.thinker.audio_tower)
+        print(
+            "[freeze] audio_tower frozen: total_params=%d trainable_params=%d "
+            "audio_tower_total=%d audio_tower_trainable=%d"
+            % (total, trainable, audio_total, audio_trainable)
+        )
 
     raw_ds = load_dataset(
         "json",
@@ -496,6 +547,10 @@ def main():
         report_to="none",
     )
 
+    callbacks = [MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)]
+    if args_cli.freeze_audio_tower == 1:
+        callbacks.append(KeepAudioTowerFrozenCallback())
+
     trainer = CastFloatInputsTrainer(
         model=model,
         args=training_args,
@@ -504,7 +559,7 @@ def main():
         data_collator=train_collator,
         eval_data_collator=eval_collator if args_cli.eval_file else None,
         tokenizer=processor.tokenizer,
-        callbacks=[MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)],
+        callbacks=callbacks,
     )
 
     if trainer.args.process_index == 0 and augment_cfg.enabled:
