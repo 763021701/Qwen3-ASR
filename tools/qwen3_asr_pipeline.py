@@ -203,11 +203,14 @@ def split_jsonl(
 def manifest_paths(config: Dict[str, Any]) -> Dict[str, str]:
     dataset = config.get("dataset", {})
     output_dir = abspath(str(dataset.get("output_dir", "data/qwen3_asr_pipeline")))
-    return {
+    paths = {
         "train": abspath(str(dataset.get("train_jsonl") or os.path.join(output_dir, "train.jsonl"))),
         "dev": abspath(str(dataset.get("dev_jsonl") or os.path.join(output_dir, "dev.jsonl"))),
         "test": abspath(str(dataset.get("test_jsonl") or os.path.join(output_dir, "test.jsonl"))),
     }
+    if not dataset.get("test_jsonl") and not os.path.isfile(paths["test"]):
+        paths.pop("test", None)
+    return paths
 
 
 def _convert_command(
@@ -244,6 +247,10 @@ def _convert_command(
                 abspath(audio_dir),
             ]
         )
+    elif source_type == "balanced_multilingual":
+        raise ValueError(
+            "balanced_multilingual uses stage_prepare dedicated command, not _convert_command."
+        )
     else:
         raise ValueError(f"Unsupported dataset.source_type: {source_type!r}")
     max_s = dataset.get("max_samples")
@@ -267,6 +274,44 @@ def _split_convert_commands(dataset: Dict[str, Any], language: str, paths: Dict[
     return commands
 
 
+def _balanced_multilingual_prepare_command(dataset: Dict[str, Any], paths: Dict[str, str]) -> List[str]:
+    script = abspath("tools/prepare_balanced_multilingual.py")
+    output_dir = os.path.dirname(paths["train"])
+    cmd = [
+        sys.executable,
+        script,
+        "--output_dir",
+        output_dir,
+        "--train_jsonl",
+        paths["train"],
+        "--dev_jsonl",
+        paths["dev"],
+        "--seed",
+        str(int(dataset.get("split_seed", 42))),
+        "--train_ratio",
+        str(float(dataset.get("train_ratio", 0.95))),
+        "--dev_ratio",
+        str(float(dataset.get("dev_ratio", 0.05))),
+    ]
+    raw_dir = str(dataset.get("raw_dir") or "raw").strip()
+    if raw_dir:
+        cmd.extend(["--raw_dir", abspath(raw_dir)])
+    optional_paths = (
+        ("l2arctic_csv", "--l2arctic_csv"),
+        ("switchlingua_jsonl", "--switchlingua_jsonl"),
+        ("youtube_mix_jsonl", "--youtube_mix_jsonl"),
+        ("youtube_en_jsonl", "--youtube_en_jsonl"),
+        ("prepare_report_json", "--report_json"),
+        ("medical_tts_csv", "--medical_tts_csv"),
+        ("medical_tts_jsonl", "--medical_tts_jsonl"),
+    )
+    for key, flag in optional_paths:
+        val = str(dataset.get(key) or "").strip()
+        if val:
+            cmd.extend([flag, abspath(val)])
+    return cmd
+
+
 def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
     dataset = config.get("dataset", {})
     language = str(dataset.get("language") or "").strip()
@@ -276,6 +321,11 @@ def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
     output_dir = os.path.dirname(paths["train"])
     if output_dir and not dry_run:
         os.makedirs(output_dir, exist_ok=True)
+
+    source_type = str(dataset.get("source_type", "")).strip()
+    if source_type == "balanced_multilingual":
+        run_command(_balanced_multilingual_prepare_command(dataset, paths), dry_run=dry_run)
+        return paths
 
     commands = _split_convert_commands(dataset, language, paths)
     if commands:
@@ -299,17 +349,23 @@ def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
 def stage_validate(config: Dict[str, Any], dry_run: bool) -> None:
     dataset = config.get("dataset", {})
     language = str(dataset.get("language") or "").strip()
-    check_audio = bool(int(dataset.get("check_audio", 1)))
+    check_audio = bool(int(dataset.get("check_audio") or 1))
     paths = manifest_paths(config)
     out_dir = abspath(str(config.get("training", {}).get("output_dir", "outputs/qwen3_asr_pipeline")))
     report_dir = os.path.join(out_dir, "validation")
     if dry_run:
         for split, path in paths.items():
+            if split == "test" and not os.path.isfile(path):
+                print(f"[dry-run] validate {split}: skip (missing)")
+                continue
             print(f"[dry-run] validate {split}: {path}")
         return
     os.makedirs(report_dir, exist_ok=True)
     failed = False
     for split, path in paths.items():
+        if split == "test" and not os.path.isfile(path):
+            print(f"[validate] {split}: skip (file not found)")
+            continue
         report = validate_jsonl(path, expected_language=language, check_audio=check_audio)
         report_path = os.path.join(report_dir, f"{split}_manifest_validation.json")
         with open(report_path, "w", encoding="utf-8") as f:
@@ -342,6 +398,7 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "grad_acc": "--grad_acc",
         "lr": "--lr",
         "epochs": "--epochs",
+        "freeze_audio_tower": "--freeze_audio_tower",
         "save_steps": "--save_steps",
         "save_total_limit": "--save_total_limit",
         "log_steps": "--log_steps",
@@ -367,8 +424,9 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
     }
     cmd.extend(["--train_file", paths["train"], "--eval_file", paths["dev"], "--output_dir", output_dir])
     for key, flag in option_map.items():
-        if key in training:
-            cmd.extend([flag, str(training[key])])
+        val = training.get(key)
+        if val is not None and key in training:
+            cmd.extend([flag, str(val)])
     if runtime.get("resume") is True and "resume" not in training:
         cmd.extend(["--resume", "1"])
     run_command(cmd, dry_run=dry_run, log_file=os.path.join(output_dir, "logs", "train.log"))
@@ -376,6 +434,9 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
 
 def stage_eval(config: Dict[str, Any], dry_run: bool) -> None:
     evaluation = config.get("evaluation", {})
+    if not evaluation or not str(evaluation.get("eval_script") or "").strip():
+        print("[eval] skipped: no evaluation.eval_script in config")
+        return
     training = config.get("training", {})
     paths = manifest_paths(config)
     output_dir = abspath(str(training.get("output_dir", "outputs/qwen3_asr_pipeline")))
@@ -415,8 +476,9 @@ def stage_eval(config: Dict[str, Any], dry_run: bool) -> None:
         "hanzi_script_norm": "--hanzi_script_norm",
     }
     for key, flag in option_map.items():
-        if key in evaluation:
-            cmd.extend([flag, str(evaluation[key])])
+        val = evaluation.get(key)
+        if val is not None and key in evaluation:
+            cmd.extend([flag, str(val)])
     run_command(cmd, dry_run=dry_run, log_file=os.path.join(output_dir, "logs", "eval.log"))
 
 

@@ -448,7 +448,7 @@ def main():
     elif use_cv_multilingual:
         if not args.cv_locales.strip():
             raise ValueError("--cv_locales is required when using --cv_multilingual_root.")
-        locales = _parse_csv_fields(args.cv_locales)
+        locales = list(dict.fromkeys(_parse_csv_fields(args.cv_locales)))  # deduplicate, preserve order
         langs_csv = args.cv_languages.strip()
         language_labels: Optional[List[str]] = _parse_csv_fields(langs_csv) if langs_csv else None
         split = args.cv_split.strip() or "train"
