@@ -28,6 +28,10 @@ Before writing any config, conversion script, or launching training, you MUST as
 - **Data split**: Does train/dev/test already exist? If splitting is needed, confirm ratios and `split_seed`.
 - **Language label**: If the language is not in `SUPPORTED_LANGUAGES` (in `qwen_asr/inference/utils.py`), confirm whether to use a neighboring label or extend the list.
 - **Transcript normalization**: Strategy for numbers, punctuation, simplified/traditional Chinese, case, code-switched text.
+- **Training mode**:
+  - **Full fine-tune** (default): all parameters trainable. Script: `finetuning/qwen3_asr_sft.py`. Supports `--freeze_audio_tower 1` to freeze encoder and train only LLM-side params.
+  - **LoRA**: add low-rank adapters to specific module groups. Script: `finetuning/qwen3_asr_sft_lora.py`. Much fewer trainable params (~1%), smaller checkpoints (~10MB each). See [LoRA Training Modes](#lora-training-modes) below.
+  - **Merge LoRA** (post-training): `tools/merge_lora.py` merges a LoRA adapter into the base model, producing a standalone checkpoint loadable by `Qwen3ASRModel.from_pretrained()`.
 - **Training budget**: Model checkpoint, epochs, batch/grad_acc, learning rate, checkpoint frequency, resume.
 - **Online augmentation**: Whether to enable `training.augment`. If yes, confirm SpeedPerturbation, AddNoise, SpecAugment probabilities and intensity. Default recommendation: start without augmentation; enable for low-resource or noisy domain shift.
 - **Other**: Tokenizer spot-check, `max_samples` smoke test, dry-run, eval scripts/metrics, stage-only runs.
@@ -113,19 +117,105 @@ Requirements:
 6. Log/count missing audio, empty pre-normalization transcripts, and empty post-normalization strings. Never silently emit bad samples.
 7. Train/dev/test share the **same** normalization implementation (manual GLOBAL RULES).
 
-Do NOT modify `finetuning/qwen3_asr_sft.py` for language-specific logic — language info belongs only in the data `text` field. Only change the training script for LoRA/multi-GPU etc.
+Do NOT modify `finetuning/qwen3_asr_sft.py` or `finetuning/qwen3_asr_sft_lora.py` for language-specific logic — language info belongs only in the data `text` field.
 
 ## Training Quick Reference
 
-- **Script**: `finetuning/qwen3_asr_sft.py`
+- **Full fine-tune**: `finetuning/qwen3_asr_sft.py`
+- **LoRA fine-tune**: `finetuning/qwen3_asr_sft_lora.py`
+- **LoRA merge**: `tools/merge_lora.py` (merge adapter into base → standalone checkpoint)
 - **Data**: `load_dataset("json", data_files=...)` — requires `audio` + `text`
-- **Key args**: `--model_path`, `--train_file`, `--eval_file`, `--output_dir`, `--sr`, `--batch_size`, `--grad_acc`, `--lr`, `--epochs`, `--save_steps`, `--resume` / `--resume_from`
-- **Online augmentation** (default off, train collator only): `--augment 1` to enable; `--augment_prob`, `--speed_prob`, `--speed_factors`, `--noise_prob`, `--noise_snr_min`, `--noise_snr_max`, `--specaug_prob`, `--specaug_time_mask_param`, `--specaug_freq_mask_param`, `--specaug_num_time_masks`, `--specaug_num_freq_masks`. In pipeline YAML, write under `training:`.
+- **Key args (full)**: `--model_path`, `--train_file`, `--eval_file`, `--output_dir`, `--sr`, `--batch_size`, `--grad_acc`, `--lr`, `--epochs`, `--save_steps`, `--freeze_audio_tower`, `--resume` / `--resume_from`
+- **Key args (LoRA)**: same basic args plus `--lora_scope`, `--lora_r`, `--lora_alpha`, `--lora_dropout`, `--merge_lora_into_base_from`, `--lr_encoder`, `--lr_aligner`, `--lr_llm`
+- **Online augmentation** (default off, train collator only; available in both scripts): `--augment 1` to enable; `--augment_prob`, `--speed_prob`, `--speed_factors`, `--noise_prob`, `--noise_snr_min`, `--noise_snr_max`, `--specaug_prob`, `--specaug_time_mask_param`, `--specaug_freq_mask_param`, `--specaug_num_time_masks`, `--specaug_num_freq_masks`. In pipeline YAML, write under `training:`.
 
 **Augmentation strategy**:
 - Start with `augment: 0` for baseline.
 - For low-resource or limited speaker/acoustic coverage: try `augment: 1`, `speed_factors: "0.9,1.0,1.1"`, moderate `noise_prob`, low-to-moderate `specaug_prob`.
 - AddNoise currently synthesizes white noise; for real background noise, confirm noise data path, sample rate, licensing, and mixing approach with user first.
+
+## LoRA Training Modes
+
+Control via CLI flags in `finetuning/qwen3_asr_sft_lora.py` (also supported in pipeline YAML under `training:`):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--lora_scope` | `encoder_aligner` | Which module group to apply LoRA to |
+| `--lora_r` | 8 | LoRA rank |
+| `--lora_alpha` | 16 | LoRA scaling factor |
+| `--lora_dropout` | 0.05 | LoRA dropout |
+| `--lora_bias` | `none` | Bias training mode |
+| `--merge_lora_into_base_from` | `""` | Path to previous stage's adapter to merge before training new LoRA |
+| `--lr_encoder` | 2e-5 | Per-module LR for speech encoder LoRA params |
+| `--lr_aligner` | 2e-5 | Per-module LR for audio-text aligner LoRA params |
+| `--lr_llm` | 2e-5 | Per-module LR for LLM LoRA params |
+
+**`--lora_scope` options:**
+
+| Scope | Target modules | Use case |
+|-------|---------------|----------|
+| `encoder` | `audio_tower.layers.*` (q/k/v/out_proj, fc1/fc2) | Adapt encoder to new acoustic domain |
+| `aligner` | `audio_tower.conv_out, proj1, proj2` | Adapt audio-text alignment |
+| `encoder_aligner` | encoder + aligner (both above) | **Stage 1**: acoustic adaptation |
+| `encoder_b4_aligner` | last 4 encoder layers + aligner | Lighter encoder adaptation |
+| `llm` | `model.layers.*` (q/k/v/o/gate/up/down_proj) | **Stage 2**: semantic recovery under degradation |
+| `all` | encoder + aligner + llm | **Stage 3**: joint end-to-end optimization |
+
+### 3-Stage Progressive Training (Mega-ASR strategy)
+
+Adapted from Mega-ASR's A2S-SFT progressive curriculum. Each stage merges the previous stage's LoRA adapter into the base model before injecting new LoRA:
+
+```bash
+# Stage 1 — acoustic adaptation (encoder + aligner)
+torchrun --nproc_per_node=N finetuning/qwen3_asr_sft_lora.py \
+  --lora_scope encoder_aligner \
+  --lora_r 8 --lora_alpha 16 \
+  --lr_encoder 1e-6 --lr_aligner 1e-6 \
+  ... (data, output, batch, etc.)
+
+# Stage 2 — semantic recovery (LLM only; merge stage-1 adapter)
+torchrun --nproc_per_node=N finetuning/qwen3_asr_sft_lora.py \
+  --lora_scope llm \
+  --lora_r 8 --lora_alpha 16 \
+  --lr_llm 1e-6 \
+  --merge_lora_into_base_from outputs/stage1/checkpoint-XXX \
+  ... (data, output, batch, etc.)
+
+# Stage 3 — joint optimization (all; merge stage-2 adapter)
+torchrun --nproc_per_node=N finetuning/qwen3_asr_sft_lora.py \
+  --lora_scope all \
+  --lora_r 8 --lora_alpha 16 \
+  --lr_encoder 5e-7 --lr_aligner 5e-7 --lr_llm 5e-7 \
+  --merge_lora_into_base_from outputs/stage2/checkpoint-XXX \
+  ... (data, output, batch, etc.)
+
+# After training, merge LoRA for inference:
+python tools/merge_lora.py \
+  --base_model Qwen/Qwen3-ASR-1.7B \
+  --adapter outputs/stage3/checkpoint-XXX \
+  --output outputs/stage3_merged
+```
+
+**Important notes:**
+- `--merge_lora_into_base_from` is **optional**. You can start from any stage independently without prior adapters.
+- Do NOT combine `--merge_lora_into_base_from` with `--resume` or `--resume_from`.
+- LoRA checkpoints save only adapter weights (~5-20MB) via `model.thinker.save_pretrained()`, NOT full model weights. They cannot be loaded directly by `Qwen3ASRModel.from_pretrained()`.
+- To use a LoRA checkpoint for inference, either (a) load it with `tools/_eval_lora_ckpt.py` which attaches the adapter at load time, or (b) merge it first with `tools/merge_lora.py` into a standalone checkpoint.
+- `--freeze_audio_tower` is available in the full-finetune script only (not LoRA); LoRA already freezes all base params and only trains adapters.
+- Per-module LRs (`--lr_encoder`, `--lr_aligner`, `--lr_llm`) are available in the LoRA script only; full-finetune uses `--lr` for all params.
+- Pipeline YAML: LoRA args go under `training:` (e.g. `training.use_lora: 1`, `training.lora_scope: "encoder_aligner"`). Note: the pipeline's `stage_train` runs `qwen3_asr_sft.py` by default; to use LoRA, set `training.use_lora: 1` (which now points to `qwen3_asr_sft_lora.py`).
+
+### Training Mode Decision Matrix
+
+| Scenario | Recommended mode |
+|----------|-----------------|
+| New language, large dataset (≥100h) | full fine-tune |
+| New language, small/medium dataset (<50h) | LoRA `encoder_aligner` or `all` |
+| Domain adaptation (same language, different acoustic conditions) | LoRA `encoder_aligner` |
+| Robustness/degradation recovery | 3-stage progressive LoRA |
+| Very limited GPU memory | LoRA (fewer trainable params → smaller optimizer state) |
+| Fast experiment iteration | LoRA (small checkpoints, fast save/load) |
+
 
 ## Additional Resources
 
