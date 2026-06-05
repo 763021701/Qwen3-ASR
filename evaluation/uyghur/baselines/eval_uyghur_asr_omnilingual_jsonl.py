@@ -33,7 +33,10 @@ import os
 import re
 import sys
 import unicodedata
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
+
+from masr_eval_pkg import compute_wer, compute_cer, compute_sentence_wer, compute_sentence_cer
+from masr_eval_pkg.normalizers import get_normalizer
 
 import numpy as np
 import torch
@@ -42,7 +45,6 @@ _ASR_TEXT_TAG = "<asr_text>"
 
 # Wav2Vec2 stack needs enough raw samples; shorter clips collapse to length 1 after striding and crash conv1d.
 _WAV2VEC2_MIN_SAMPLES_16K = 16000
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -99,7 +101,6 @@ def parse_args() -> argparse.Namespace:
     )
     return p.parse_args()
 
-
 def extract_reference_text(label: str) -> str:
     """Strip Qwen3 training prefix like 'language Uyghur<asr_text>...'."""
     s = (label or "").strip()
@@ -108,70 +109,6 @@ def extract_reference_text(label: str) -> str:
     if _ASR_TEXT_TAG in s:
         return s.split(_ASR_TEXT_TAG, 1)[1].strip()
     return s
-
-
-_ZW_RE = re.compile(r"[\u200c\u200d\ufeff]")
-
-
-def normalize_for_scoring(s: str) -> str:
-    """NFC, drop common zero-width chars, collapse whitespace."""
-    s = unicodedata.normalize("NFC", (s or "").strip())
-    s = _ZW_RE.sub("", s)
-    s = " ".join(s.split())
-    return s
-
-
-def _levenshtein_1d(a: Sequence[Any], b: Sequence[Any]) -> int:
-    la, lb = len(a), len(b)
-    if la == 0:
-        return lb
-    if lb == 0:
-        return la
-    prev = list(range(lb + 1))
-    for i in range(1, la + 1):
-        cur = [i] + [0] * lb
-        ai = a[i - 1]
-        for j in range(1, lb + 1):
-            cost = 0 if ai == b[j - 1] else 1
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-        prev = cur
-    return prev[lb]
-
-
-def corpus_wer_cer_fallback(refs: List[str], hyps: List[str]) -> Tuple[float, float]:
-    """Corpus-level WER/CER via summed edit distance / summed reference length."""
-    w_err, w_den = 0, 0
-    c_err, c_den = 0, 0
-    for r, h in zip(refs, hyps):
-        rw = r.split()
-        hw = h.split()
-        if len(rw) == 0 and len(hw) == 0:
-            pass
-        elif len(rw) == 0:
-            w_err += len(hw)
-            w_den += max(len(hw), 1)
-        else:
-            w_err += _levenshtein_1d(rw, hw)
-            w_den += len(rw)
-
-        rc = list(r)
-        hc = list(h)
-        if len(rc) == 0 and len(hc) == 0:
-            pass
-        elif len(rc) == 0:
-            c_err += len(hc)
-            c_den += max(len(hc), 1)
-        else:
-            c_err += _levenshtein_1d(rc, hc)
-            c_den += len(rc)
-    return w_err / max(w_den, 1), c_err / max(c_den, 1)
-
-
-def corpus_wer_cer_jiwer(refs: List[str], hyps: List[str]) -> Tuple[float, float]:
-    import jiwer
-
-    return float(jiwer.wer(refs, hyps)), float(jiwer.cer(refs, hyps))
-
 
 def load_manifest(path: str, max_samples: int) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
@@ -184,7 +121,6 @@ def load_manifest(path: str, max_samples: int) -> List[Dict[str, Any]]:
             if max_samples > 0 and len(rows) >= max_samples:
                 break
     return rows
-
 
 def resolve_torch_dtype(name: str) -> torch.dtype:
     key = str(name or "auto").strip().lower()
@@ -204,7 +140,6 @@ def resolve_torch_dtype(name: str) -> torch.dtype:
         raise ValueError(f"Unknown dtype {name!r}. Use auto, bfloat16, float16, or float32.")
     return mapping[key]
 
-
 def load_audio_waveform_dict(path: str, min_samples_16k: int) -> Dict[str, Any]:
     """Load audio as dict for ASRInferencePipeline (bypasses fairseq2 file decoder).
 
@@ -223,7 +158,6 @@ def load_audio_waveform_dict(path: str, min_samples_16k: int) -> Dict[str, Any]:
     w = torch.from_numpy(wav.astype("float32", copy=False))
     return {"waveform": w, "sample_rate": 16000}
 
-
 def build_transcribe_inputs(
     batch_paths: List[str], audio_input: str, min_samples_16k: int
 ) -> Union[List[str], List[Dict[str, Any]]]:
@@ -232,7 +166,6 @@ def build_transcribe_inputs(
         return batch_paths
     # auto == librosa: always decode + pad (avoids mp3 decode errors and short-wav crashes on native path)
     return [load_audio_waveform_dict(p, min_samples_16k) for p in batch_paths]
-
 
 def main() -> None:
     args = parse_args()
@@ -298,22 +231,26 @@ def main() -> None:
         print("Internal error: prediction count mismatch.", file=sys.stderr)
         sys.exit(1)
 
-    refs = [normalize_for_scoring(r) for r in refs_raw]
-    hyps = [normalize_for_scoring(h) for h in predictions]
+    normalizer = get_normalizer("ug")
+    ref_wer = [normalizer.normalize_for_wer(r) for r in refs_raw]
+    hyp_wer = [normalizer.normalize_for_wer(h) for h in predictions]
+    ref_cer = [normalizer.normalize_for_cer(r) for r in refs_raw]
+    hyp_cer = [normalizer.normalize_for_cer(h) for h in predictions]
 
-    try:
-        wer, cer = corpus_wer_cer_jiwer(refs, hyps)
-        backend = "jiwer"
-    except ImportError:
-        wer, cer = corpus_wer_cer_fallback(refs, hyps)
-        backend = "builtin_levenshtein"
+    wer_result = compute_wer(ref_wer, hyp_wer, per_sample=True)
+    cer_result = compute_cer(ref_cer, hyp_cer, per_sample=True)
+    wer = wer_result["wer"]
+    cer = cer_result["cer"]
+    backend = "masr"
+    per_sample_wer = wer_result["per_sample"]
+    per_sample_cer = cer_result["per_sample"]
 
     print("")
     print("=== Uyghur ASR metrics (omnilingual-asr) ===")
     print(f"Model card:  {args.model_card}")
     print(f"Lang id:     {lang}")
     print(f"Samples:     {len(rows)}")
-    print(f"Scoring:     NFC, ZWSP removed, whitespace collapsed")
+    print(f"Scoring:     UyghurNormalizer (NFC, ZWNJ/ZWJ/BOM removed, whitespace collapsed)")
     print(f"Backend:     {backend}")
     print(f"WER:         {wer * 100:.2f}%")
     print(f"CER:         {cer * 100:.2f}%")
@@ -326,24 +263,18 @@ def main() -> None:
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as wf:
-            for ex, rr, hh, pr in zip(rows, refs, hyps, predictions):
-                rw, hw = rr.split(), hh.split()
-                if len(rw) == 0:
-                    dist = len(hw)
-                else:
-                    dist = _levenshtein_1d(rw, hw)
+            for ex, rw, hw, pr, wr in zip(rows, ref_wer, hyp_wer, predictions, per_sample_wer):
                 rec = {
                     "audio": ex["audio"],
                     "reference_raw": extract_reference_text(ex["text"]),
                     "hypothesis_raw": pr,
-                    "reference_norm": rr,
-                    "hypothesis_norm": hh,
-                    "utterance_word_errors": dist,
-                    "reference_word_count": max(len(rw), 1) if len(rw) == 0 else len(rw),
+                    "reference_norm": rw,
+                    "hypothesis_norm": hw,
+                    "utterance_word_errors": wr["substitutions"] + wr["deletions"] + wr["insertions"],
+                    "reference_word_count": max(wr["n_ref_tokens"], 1),
                 }
                 wf.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"Wrote predictions to {out_path}")
-
 
 if __name__ == "__main__":
     main()

@@ -33,9 +33,12 @@ import os
 import re
 import sys
 import unicodedata
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+
+from masr_eval_pkg import compute_wer, compute_cer, compute_sentence_wer, compute_sentence_cer
+from masr_eval_pkg.normalizers import get_normalizer
 
 from qwen_asr import Qwen3ASRModel
 from qwen_asr.inference.utils import parse_asr_output
@@ -82,7 +85,6 @@ def extract_reference_text(label: str) -> str:
     return s
 
 
-_ZW_RE = re.compile(r"[\u200c\u200d\ufeff]")
 _LETTER_CATS = frozenset({"Lu", "Ll", "Lt", "Lm"})
 
 
@@ -149,66 +151,6 @@ def align_hypothesis_script_to_reference(
     if rk == "latin" and hk == "arabic":
         return conv_uas_to_uls(hyp), "UAS_to_ULS"
     return hyp, "none"
-
-
-def normalize_for_scoring(s: str) -> str:
-    """NFC, drop common zero-width chars, collapse whitespace."""
-    s = unicodedata.normalize("NFC", (s or "").strip())
-    s = _ZW_RE.sub("", s)
-    s = " ".join(s.split())
-    return s
-
-
-def _levenshtein_1d(a: Sequence[Any], b: Sequence[Any]) -> int:
-    la, lb = len(a), len(b)
-    if la == 0:
-        return lb
-    if lb == 0:
-        return la
-    prev = list(range(lb + 1))
-    for i in range(1, la + 1):
-        cur = [i] + [0] * lb
-        ai = a[i - 1]
-        for j in range(1, lb + 1):
-            cost = 0 if ai == b[j - 1] else 1
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-        prev = cur
-    return prev[lb]
-
-
-def corpus_wer_cer_fallback(refs: List[str], hyps: List[str]) -> Tuple[float, float]:
-    """Corpus-level WER/CER via summed edit distance / summed reference length."""
-    w_err, w_den = 0, 0
-    c_err, c_den = 0, 0
-    for r, h in zip(refs, hyps):
-        rw = r.split()
-        hw = h.split()
-        if len(rw) == 0 and len(hw) == 0:
-            pass
-        elif len(rw) == 0:
-            w_err += len(hw)
-            w_den += max(len(hw), 1)
-        else:
-            w_err += _levenshtein_1d(rw, hw)
-            w_den += len(rw)
-
-        rc = list(r)
-        hc = list(h)
-        if len(rc) == 0 and len(hc) == 0:
-            pass
-        elif len(rc) == 0:
-            c_err += len(hc)
-            c_den += max(len(hc), 1)
-        else:
-            c_err += _levenshtein_1d(rc, hc)
-            c_den += len(rc)
-    return w_err / max(w_den, 1), c_err / max(c_den, 1)
-
-
-def corpus_wer_cer_jiwer(refs: List[str], hyps: List[str]) -> Tuple[float, float]:
-    import jiwer
-
-    return float(jiwer.wer(refs, hyps)), float(jiwer.cer(refs, hyps))
 
 
 def load_manifest(path: str, max_samples: int) -> List[Dict[str, Any]]:
@@ -302,20 +244,24 @@ def main() -> None:
         umsc_actions = ["none"] * len(predictions)
         umsc_counts = {"none": len(predictions), "ULS_to_UAS": 0, "UAS_to_ULS": 0}
 
-    refs = [normalize_for_scoring(r) for r in refs_raw]
-    hyps = [normalize_for_scoring(h) for h in hyps_raw_for_score]
+    normalizer = get_normalizer("ug")
+    ref_wer = [normalizer.normalize_for_wer(r) for r in refs_raw]
+    hyp_wer = [normalizer.normalize_for_wer(h) for h in hyps_raw_for_score]
+    ref_cer = [normalizer.normalize_for_cer(r) for r in refs_raw]
+    hyp_cer = [normalizer.normalize_for_cer(h) for h in hyps_raw_for_score]
 
-    try:
-        wer, cer = corpus_wer_cer_jiwer(refs, hyps)
-        backend = "jiwer"
-    except ImportError:
-        wer, cer = corpus_wer_cer_fallback(refs, hyps)
-        backend = "builtin_levenshtein"
+    wer_result = compute_wer(ref_wer, hyp_wer, per_sample=True)
+    cer_result = compute_cer(ref_cer, hyp_cer, per_sample=True)
+    wer = wer_result["wer"]
+    cer = cer_result["cer"]
+    backend = "masr (UyghurNormalizer)"
+    per_sample_wer = wer_result["per_sample"]
+    per_sample_cer = cer_result["per_sample"]
 
     print("")
     print("=== Uyghur ASR metrics ===")
     print(f"Samples:     {len(rows)}")
-    print(f"Scoring:     NFC, ZWSP removed, whitespace collapsed")
+    print(f"Scoring:     UyghurNormalizer (NFC, ZWNJ/ZWJ/BOM removed, punctuation removed, whitespace collapsed)")
     if umsc_align:
         print(
             "umsc align:  hypothesis converted to reference script when ref/hyp disagree "
@@ -337,24 +283,19 @@ def main() -> None:
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as wf:
-            for ex, rr, hh, pr, h_raw_sc, act in zip(
-                rows, refs, hyps, predictions, hyps_raw_for_score, umsc_actions
+            for ex, rw, hw, pr, h_raw_sc, act, wr in zip(
+                rows, ref_wer, hyp_wer, predictions, hyps_raw_for_score, umsc_actions, per_sample_wer
             ):
-                rw, hw = rr.split(), hh.split()
-                if len(rw) == 0:
-                    dist = len(hw)
-                else:
-                    dist = _levenshtein_1d(rw, hw)
                 rec = {
                     "audio": ex["audio"],
                     "reference_raw": extract_reference_text(ex["text"]),
                     "hypothesis_raw": pr,
                     "hypothesis_umsc_action": act,
                     "hypothesis_for_scoring_raw": h_raw_sc,
-                    "reference_norm": rr,
-                    "hypothesis_norm": hh,
-                    "utterance_word_errors": dist,
-                    "reference_word_count": max(len(rw), 1) if len(rw) == 0 else len(rw),
+                    "reference_norm": rw,
+                    "hypothesis_norm": hw,
+                    "utterance_word_errors": wr["substitutions"] + wr["deletions"] + wr["insertions"],
+                    "reference_word_count": max(wr["n_ref_tokens"], 1),
                 }
                 wf.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"Wrote predictions to {out_path}")

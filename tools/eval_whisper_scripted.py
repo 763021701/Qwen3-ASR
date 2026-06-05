@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Evaluate base and fine-tuned Whisper on scripted metadata CSV."""
+"""Evaluate base and fine-tuned Whisper on scripted metadata CSV.
+
+Normalization and metrics are delegated to MASR_Eval_Pkg (EnglishNormalizer +
+compute_wer / compute_cer).
+"""
 
 import csv
 import json
-import re
 import sys
 import time
 from pathlib import Path
 
 from faster_whisper import WhisperModel
+
+from masr_eval_pkg import compute_wer, compute_cer, compute_sentence_wer, compute_sentence_cer
+from masr_eval_pkg.normalizers import get_normalizer
 
 # --- Config ---
 CSV_PATH = "raw/scripted_metadata.csv"
@@ -22,71 +28,6 @@ FT_MIXED_MODEL = "/root/autodl-tmp/workspace/project/Export/whisper-large-v3-fin
 DEVICE = "cuda"
 COMPUTE_TYPE = "float16"
 BATCH_SIZE = 16
-
-
-def normalize(text: str) -> str:
-    """Match existing eval normalization: lowercase, strip punctuation to spaces."""
-    text = text.lower()
-    # Replace punctuation (except apostrophes within words) with space
-    text = re.sub(r"[^a-z0-9' ]", " ", text)
-    # Collapse whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    # Remove standalone apostrophes that became separated
-    text = re.sub(r"\b'\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def tokenize(text: str) -> list[str]:
-    return text.split()
-
-
-def compute_metrics(ref: str, hyp: str):
-    """Token WER and Char CER."""
-    ref_tokens = tokenize(ref)
-    hyp_tokens = tokenize(hyp)
-
-    # Simple Levenshtein for tokens
-    n, m = len(ref_tokens), len(hyp_tokens)
-    dp = [[0] * (m + 1) for _ in range(n + 1)]
-    for i in range(n + 1):
-        dp[i][0] = i
-    for j in range(m + 1):
-        dp[0][j] = j
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            cost = 0 if ref_tokens[i - 1] == hyp_tokens[j - 1] else 1
-            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
-
-    token_errs = dp[n][m]
-    token_count = n
-
-    # Char CER
-    ref_chars = ref.replace(" ", "")
-    hyp_chars = hyp.replace(" ", "")
-    nc, mc = len(ref_chars), len(hyp_chars)
-    dpc = [[0] * (mc + 1) for _ in range(nc + 1)]
-    for i in range(nc + 1):
-        dpc[i][0] = i
-    for j in range(mc + 1):
-        dpc[0][j] = j
-    for i in range(1, nc + 1):
-        for j in range(1, mc + 1):
-            cost = 0 if ref_chars[i - 1] == hyp_chars[j - 1] else 1
-            dpc[i][j] = min(dpc[i - 1][j] + 1, dpc[i][j - 1] + 1, dpc[i - 1][j - 1] + cost)
-
-    char_errs = dpc[nc][mc]
-    char_count = nc
-
-    return {
-        "reference_tokens": ref_tokens,
-        "hypothesis_tokens": hyp_tokens,
-        "utterance_token_errors": token_errs,
-        "reference_token_count": token_count,
-        "utterance_char_errors": char_errs,
-        "reference_char_count": char_count,
-        "exact_match": token_errs == 0,
-    }
 
 
 def load_csv(path: str) -> list[dict]:
@@ -126,6 +67,7 @@ def transcribe_dataset(model: WhisperModel, rows: list[dict], model_name: str) -
 
 def transcribe_one_by_one(model: WhisperModel, rows: list[dict], model_name: str) -> list[dict]:
     """Transcribe each audio individually and return predictions."""
+    normalizer = get_normalizer("en")
     results = []
     total = len(rows)
     start = time.time()
@@ -141,10 +83,15 @@ def transcribe_one_by_one(model: WhisperModel, rows: list[dict], model_name: str
         segments, info = model.transcribe(audio_path, language=None, without_timestamps=True)
         hyp_raw = " ".join(seg.text.strip() for seg in segments).strip()
 
-        ref_norm = normalize(ref_raw)
-        hyp_norm = normalize(hyp_raw)
+        ref_norm = normalizer.normalize(ref_raw)
+        hyp_norm = normalizer.normalize(hyp_raw)
 
-        metrics = compute_metrics(ref_norm, hyp_norm)
+        # Per-utterance metrics via MASR
+        sw = compute_sentence_wer(ref_norm, hyp_norm)
+        ref_cer_text = normalizer.normalize_for_cer(ref_raw)
+        hyp_cer_text = normalizer.normalize_for_cer(hyp_raw)
+        sc = compute_sentence_cer(ref_cer_text, hyp_cer_text)
+
         detected_lang = info.language if info else "unknown"
         lang_prob = info.language_probability if info else 0.0
 
@@ -154,7 +101,13 @@ def transcribe_one_by_one(model: WhisperModel, rows: list[dict], model_name: str
             "hypothesis_raw": hyp_raw,
             "reference_norm": ref_norm,
             "hypothesis_norm": hyp_norm,
-            **metrics,
+            "reference_tokens": ref_norm.split(),
+            "hypothesis_tokens": hyp_norm.split(),
+            "utterance_token_errors": sw["substitutions"] + sw["deletions"] + sw["insertions"],
+            "reference_token_count": max(sw["n_ref_tokens"], 1),
+            "utterance_char_errors": sc["substitutions"] + sc["deletions"] + sc["insertions"],
+            "reference_char_count": max(sc["n_ref_chars"], 1),
+            "exact_match": sw["substitutions"] + sw["deletions"] + sw["insertions"] == 0,
             "detected_language": detected_lang,
             "language_probability": lang_prob,
         })
@@ -170,16 +123,23 @@ def transcribe_one_by_one(model: WhisperModel, rows: list[dict], model_name: str
 
 
 def compute_summary(results: list[dict]) -> dict:
-    total_err = sum(r["utterance_token_errors"] for r in results)
-    total_tok = sum(r["reference_token_count"] for r in results)
-    total_cerr = sum(r["utterance_char_errors"] for r in results)
-    total_char = sum(r["reference_char_count"] for r in results)
+    refs = [r["reference_norm"] for r in results]
+    hyps = [r["hypothesis_norm"] for r in results]
+
+    wer_result = compute_wer(refs, hyps)
+    cer_result = compute_cer(refs, hyps)
+
+    total_err = wer_result["substitutions"] + wer_result["deletions"] + wer_result["insertions"]
+    total_tok = wer_result["n_ref_tokens"]
+    total_cerr = cer_result["substitutions"] + cer_result["deletions"] + cer_result["insertions"]
+    total_char = cer_result["n_ref_chars"]
+
     exact = sum(1 for r in results if r["exact_match"])
 
     return {
         "num_utterances": len(results),
-        "token_wer": f"{total_err / total_tok * 100:.2f}%" if total_tok > 0 else "N/A",
-        "char_cer": f"{total_cerr / total_char * 100:.2f}%" if total_char > 0 else "N/A",
+        "token_wer": f"{wer_result['wer'] * 100:.2f}%" if total_tok > 0 else "N/A",
+        "char_cer": f"{cer_result['cer'] * 100:.2f}%" if total_char > 0 else "N/A",
         "total_token_errors": total_err,
         "total_reference_tokens": total_tok,
         "exact_matches": exact,
