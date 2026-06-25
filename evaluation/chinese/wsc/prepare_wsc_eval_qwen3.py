@@ -57,8 +57,9 @@ def parse_args() -> argparse.Namespace:
         "--subset",
         type=str,
         default="all",
-        choices=("all", "short", "long", "easy", "hard"),
-        help="Subset to convert. all = Short + Long (full duration-based set, no duplicates).",
+        choices=("all", "short", "long", "easy", "hard", "easy_hard"),
+        help="Subset to convert. all = Short + Long (duration-based full set); "
+        "easy_hard = Easy + Hard (difficulty-based full set, matches the paper).",
     )
     parser.add_argument(
         "--language",
@@ -90,6 +91,8 @@ def subset_dirs(subset: str) -> List[str]:
     key = subset.strip().lower()
     if key == "all":
         return ["Short", "Long"]
+    if key == "easy_hard":
+        return ["Easy", "Hard"]
     return [key.capitalize()]
 
 
