@@ -14,9 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import importlib.util
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -46,6 +48,9 @@ def patch_outer_forward(model):
         input_features=None,
         feature_attention_mask=None,
         labels=None,
+        ctc_labels=None,
+        ctc_label_lengths=None,
+        return_ctc_logits=False,
         **kwargs,
     ):
         return self.thinker.forward(
@@ -54,6 +59,9 @@ def patch_outer_forward(model):
             input_features=input_features,
             feature_attention_mask=feature_attention_mask,
             labels=labels,
+            ctc_labels=ctc_labels,
+            ctc_label_lengths=ctc_label_lengths,
+            return_ctc_logits=return_ctc_logits,
             **kwargs,
         )
 
@@ -86,6 +94,101 @@ def load_audio(path: str, sr: int = 16000):
     return wav
 
 
+def default_ctc_vocab_path() -> str:
+    candidates = [
+        os.environ.get("CTC_VOCAB_PATH", ""),
+        "/root/.cache/modelscope/hub/models/FunAudioLLM/Fun-ASR-Nano-2512/multilingual.tiktoken",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Fun-ASR-Nano-2512", "multilingual.tiktoken")),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return candidates[1]
+
+
+def maybe_add_funasr_path(funasr_path: str):
+    candidates = [
+        funasr_path,
+        os.environ.get("FUNASR_PATH", ""),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "FunASR")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Fun-ASR")),
+    ]
+    for path in candidates:
+        if path and os.path.isdir(path) and path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def load_ctc_tokenizer(vocab_path: str, funasr_path: str = ""):
+    maybe_add_funasr_path(funasr_path)
+    if not os.path.exists(vocab_path):
+        raise FileNotFoundError(f"CTC vocab not found: {vocab_path}")
+
+    roots = [
+        funasr_path,
+        os.environ.get("FUNASR_PATH", ""),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "FunASR")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "Fun-ASR")),
+    ]
+    for root in roots:
+        if not root:
+            continue
+        candidates = [
+            os.path.join(root, "funasr", "models", "sense_voice", "whisper_lib", "tokenizer.py"),
+            os.path.join(root, "models", "sense_voice", "whisper_lib", "tokenizer.py"),
+        ]
+        for tokenizer_py in candidates:
+            if os.path.exists(tokenizer_py):
+                spec = importlib.util.spec_from_file_location("_qwen3_asr_sensevoice_tokenizer", tokenizer_py)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module.get_tokenizer(
+                    multilingual=True,
+                    num_languages=8749,
+                    vocab_path=vocab_path,
+                )
+
+    from funasr.tokenizer.whisper_tokenizer import SenseVoiceTokenizer
+
+    return SenseVoiceTokenizer(
+        vocab_path=vocab_path,
+        is_multilingual=True,
+        num_languages=8749,
+    )
+
+
+def enable_ctc_training(model, vocab_path: str):
+    thinker = model.thinker if hasattr(model, "thinker") else model
+    audio_config = getattr(getattr(thinker, "config", None), "audio_config", None)
+    ctc_input_dim = getattr(audio_config, "d_model", 1280)
+    ctc_config = {
+        "enabled": True,
+        "input_dim": int(ctc_input_dim),
+        "model_dim": 512,
+        "ffn_dim": 2048,
+        "n_layer": 5,
+        "attention_heads": 8,
+        "dropout": 0.0,
+        "vocab_size": 60515,
+        "blank_id": 60514,
+        "time_step_sec": 0.08,
+        "tokenizer": {
+            "name": "SenseVoiceTokenizer",
+            "vocab_path": vocab_path,
+            "is_multilingual": True,
+            "num_languages": 8749,
+        },
+    }
+    thinker.enable_ctc(ctc_config)
+    if hasattr(model, "config") and hasattr(model.config, "thinker_config"):
+        model.config.thinker_config.ctc_config = ctc_config
+    for _, param in model.named_parameters():
+        param.requires_grad = False
+    for module in (thinker.ctc_decoder, thinker.ctc_head):
+        for param in module.parameters():
+            param.requires_grad = True
+    return ctc_config
+
+
 def build_prefix_messages(prompt: str, audio_array):
     return [
         {"role": "system", "content": prompt or ""},
@@ -115,25 +218,43 @@ def make_preprocess_fn_prefix_only(processor):
 class DataCollatorForQwen3ASRFinetuning:
     processor: Any
     sampling_rate: int = 16000
+    ctc_tokenizer: Any = None
+    train_ctc_only: bool = False
+
+    def _build_ctc_labels(self, targets: List[str]) -> Dict[str, torch.Tensor]:
+        if self.ctc_tokenizer is None:
+            return {}
+        token_tensors = [torch.tensor(self.ctc_tokenizer.encode(text), dtype=torch.long) for text in targets]
+        lengths = torch.tensor([tokens.numel() for tokens in token_tensors], dtype=torch.long)
+        max_len = max(int(lengths.max().item()) if len(lengths) > 0 else 0, 1)
+        labels = torch.full((len(token_tensors), max_len), fill_value=0, dtype=torch.long)
+        for i, tokens in enumerate(token_tensors):
+            if tokens.numel() > 0:
+                labels[i, : tokens.numel()] = tokens
+        return {"ctc_labels": labels, "ctc_label_lengths": lengths}
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_paths = [f["audio"] for f in features]
         prefix_texts = [f["prefix_text"] for f in features]
         targets = [f["target"] for f in features]
-
-        eos = self.processor.tokenizer.eos_token or ""
-        full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
         audios = [load_audio(p, sr=self.sampling_rate) for p in audio_paths]
 
-        full_inputs = self.processor(
-            text=full_texts,
+        prefix_inputs = self.processor(
+            text=prefix_texts,
             audio=audios,
             return_tensors="pt",
             padding=True,
             truncation=False,
         )
-        prefix_inputs = self.processor(
-            text=prefix_texts,
+
+        if self.train_ctc_only:
+            prefix_inputs.update(self._build_ctc_labels(targets))
+            return prefix_inputs
+
+        eos = self.processor.tokenizer.eos_token or ""
+        full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
+        full_inputs = self.processor(
+            text=full_texts,
             audio=audios,
             return_tensors="pt",
             padding=True,
@@ -150,6 +271,7 @@ class DataCollatorForQwen3ASRFinetuning:
             labels[labels == pad_id] = -100
 
         full_inputs["labels"] = labels
+        full_inputs.update(self._build_ctc_labels(targets))
         return full_inputs
 
 
@@ -212,6 +334,11 @@ def parse_args():
     # Audio
     p.add_argument("--sr", type=int, default=16000)
 
+    # CTC auxiliary branch
+    p.add_argument("--train_ctc_only", type=int, default=0)
+    p.add_argument("--ctc_vocab_path", type=str, default="")
+    p.add_argument("--funasr_path", type=str, default="")
+
     # Train hyper-params
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--grad_acc", type=int, default=4)
@@ -257,6 +384,12 @@ def main():
     patch_outer_forward(model)
     model.generation_config = GenerationConfig.from_model_config(model.config)
 
+    ctc_tokenizer = None
+    if args_cli.train_ctc_only == 1:
+        ctc_vocab_path = args_cli.ctc_vocab_path or default_ctc_vocab_path()
+        ctc_tokenizer = load_ctc_tokenizer(ctc_vocab_path, args_cli.funasr_path)
+        enable_ctc_training(model, ctc_vocab_path)
+
     raw_ds = load_dataset(
         "json",
         data_files={
@@ -272,7 +405,12 @@ def main():
         if drop:
             ds[split] = ds[split].remove_columns(drop)
 
-    collator = DataCollatorForQwen3ASRFinetuning(processor=processor, sampling_rate=args_cli.sr)
+    collator = DataCollatorForQwen3ASRFinetuning(
+        processor=processor,
+        sampling_rate=args_cli.sr,
+        ctc_tokenizer=ctc_tokenizer,
+        train_ctc_only=(args_cli.train_ctc_only == 1),
+    )
 
     training_args = TrainingArguments(
         output_dir=args_cli.output_dir,
@@ -291,7 +429,7 @@ def main():
         save_steps=args_cli.save_steps,
         save_total_limit=args_cli.save_total_limit,
         save_safetensors=True,
-        eval_strategy="steps",
+        eval_strategy="steps" if args_cli.eval_file else "no",
         eval_steps=args_cli.save_steps,
         do_eval=bool(args_cli.eval_file),
         bf16=use_bf16,

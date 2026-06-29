@@ -304,6 +304,9 @@ class Qwen3ASRThinkerCausalLMOutputWithPast(MoeCausalLMOutputWithPast):
     """
 
     rope_deltas: Optional[torch.LongTensor] = None
+    ctc_loss: Optional[torch.FloatTensor] = None
+    ctc_logits: Optional[torch.FloatTensor] = None
+    ctc_input_lengths: Optional[torch.LongTensor] = None
 
 
 def _get_feat_extract_output_lengths(input_lengths):
@@ -315,6 +318,80 @@ def _get_feat_extract_output_lengths(input_lengths):
     feat_lengths = (input_lengths_leave - 1) // 2 + 1
     output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
     return output_lengths
+
+
+class Qwen3ASRCTCDecoderLayer(nn.Module):
+    def __init__(self, model_dim: int, attention_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(model_dim)
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=model_dim,
+            num_heads=attention_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm2 = nn.LayerNorm(model_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(model_dim, model_dim // 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(model_dim // 4, model_dim),
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        residual = x
+        h = self.norm1(x)
+        h, _ = self.self_attn(h, h, h, key_padding_mask=key_padding_mask, need_weights=False)
+        x = residual + self.dropout(h)
+        residual = x
+        h = self.norm2(x)
+        x = residual + self.dropout(self.ffn(h))
+        return x
+
+
+class Qwen3ASRCTCDecoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int = 1280,
+        model_dim: int = 512,
+        ffn_dim: int = 2048,
+        n_layer: int = 5,
+        attention_heads: int = 8,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.linear1 = nn.Linear(input_dim, ffn_dim)
+        self.relu = nn.ReLU()
+        self.linear2 = nn.Linear(ffn_dim, model_dim)
+        self.layers = nn.ModuleList(
+            [Qwen3ASRCTCDecoderLayer(model_dim, attention_heads, dropout) for _ in range(n_layer)]
+        )
+
+    @staticmethod
+    def lengths_to_padding_mask(lengths: torch.Tensor, max_len: int) -> torch.Tensor:
+        idx = torch.arange(max_len, device=lengths.device)
+        return idx.unsqueeze(0) >= lengths.unsqueeze(1)
+
+    def forward(self, x: torch.Tensor, lengths: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
+        x = self.linear2(self.relu(self.linear1(x)))
+        if lengths is None:
+            lengths = torch.full((x.size(0),), x.size(1), dtype=torch.long, device=x.device)
+        key_padding_mask = self.lengths_to_padding_mask(lengths, x.size(1))
+        for layer in self.layers:
+            x = layer(x, key_padding_mask=key_padding_mask)
+        x = x.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
+        return x, lengths
+
+
+class Qwen3ASRCTCHead(nn.Module):
+    def __init__(self, model_dim: int = 512, vocab_size: int = 60515, blank_id: int = 60514):
+        super().__init__()
+        self.ctc_lo = nn.Linear(model_dim, vocab_size)
+        self.blank_id = blank_id
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.log_softmax(self.ctc_lo(x), dim=-1)
 
 
 class Qwen3ASRPreTrainedModelForConditionalGeneration(Qwen3ASRPreTrainedModel):
@@ -671,12 +748,15 @@ class Qwen3ASRAudioEncoder(Qwen3ASRPreTrainedModel):
         input_features,
         feature_lens=None,
         aftercnn_lens=None,
+        return_ctc_hidden: bool = False,
     ):
         r"""
         feature_lens (`torch.LongTensor` of shape `(batch_size,)`):
             mel length
         aftercnn_lens (`torch.LongTensor` of shape `(batch_size,)`):
             mel length after cnn
+        return_ctc_hidden (`bool`, *optional*, defaults to `False`):
+            Whether to return the audio hidden states before the LLM projection for CTC.
         """
         aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
@@ -734,9 +814,12 @@ class Qwen3ASRAudioEncoder(Qwen3ASRPreTrainedModel):
             hidden_states = layer_outputs[0]
 
         hidden_states = self.ln_post(hidden_states)
+        ctc_hidden_states = hidden_states if return_ctc_hidden else None
         hidden_states = self.proj1(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states = self.proj2(hidden_states)
+        if return_ctc_hidden:
+            return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=(ctc_hidden_states,))
         return BaseModelOutput(last_hidden_state=hidden_states)
 
     def padded_and_mask_function(self, tensor_list, tensor_len, padding_value=0, padding_side="right"):
@@ -983,7 +1066,7 @@ class Qwen3ASRThinkerTextModel(Qwen3ASRPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs()
+    @check_model_inputs
     @auto_docstring
     def forward(
         self,
@@ -996,6 +1079,10 @@ class Qwen3ASRThinkerTextModel(Qwen3ASRPreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[tuple, BaseModelOutputWithPast]:
+        r"""
+        cache_position (`torch.LongTensor`, *optional*):
+            Cache positions used during incremental generation.
+        """
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -1086,9 +1173,59 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
             self.lm_head = nn.Linear(config.text_config.hidden_size, config.classify_num, bias=False)
         else:
             self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
+        self.ctc_decoder = None
+        self.ctc_head = None
+        self.ctc_time_step_sec = 0.08
+        ctc_config = getattr(config, "ctc_config", {}) or {}
+        if ctc_config.get("enabled", False):
+            self._build_ctc_modules(ctc_config)
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
         self.rope_deltas = None
         self.post_init()
+
+    def _infer_ctc_input_dim(self) -> int:
+        audio_config = getattr(self.config, "audio_config", None)
+        for attr in ("d_model", "hidden_size"):
+            value = getattr(audio_config, attr, None)
+            if value is not None:
+                return int(value)
+        audio_tower_config = getattr(getattr(self, "audio_tower", None), "config", None)
+        for attr in ("d_model", "hidden_size"):
+            value = getattr(audio_tower_config, attr, None)
+            if value is not None:
+                return int(value)
+        return 1280
+
+    def _build_ctc_modules(self, ctc_config: dict):
+        self.ctc_decoder = Qwen3ASRCTCDecoder(
+            input_dim=ctc_config.get("input_dim") or self._infer_ctc_input_dim(),
+            model_dim=ctc_config.get("model_dim", 512),
+            ffn_dim=ctc_config.get("ffn_dim", 2048),
+            n_layer=ctc_config.get("n_layer", 5),
+            attention_heads=ctc_config.get("attention_heads", 8),
+            dropout=ctc_config.get("dropout", 0.0),
+        )
+        vocab_size = ctc_config.get("vocab_size", 60515)
+        blank_id = ctc_config.get("blank_id", vocab_size - 1)
+        self.ctc_head = Qwen3ASRCTCHead(
+            model_dim=ctc_config.get("model_dim", 512),
+            vocab_size=vocab_size,
+            blank_id=blank_id,
+        )
+        self.ctc_time_step_sec = ctc_config.get("time_step_sec", 0.08)
+
+    def enable_ctc(self, ctc_config: Optional[dict] = None):
+        ctc_config = dict(ctc_config or {})
+        ctc_config.setdefault("enabled", True)
+        ctc_config.setdefault("vocab_size", 60515)
+        ctc_config.setdefault("blank_id", ctc_config["vocab_size"] - 1)
+        ctc_config.setdefault("time_step_sec", 0.08)
+        self.config.ctc_config = ctc_config
+        self._build_ctc_modules(ctc_config)
+        ref_param = next(self.audio_tower.parameters())
+        self.ctc_decoder = self.ctc_decoder.to(device=ref_param.device, dtype=torch.float32)
+        self.ctc_head = self.ctc_head.to(device=ref_param.device, dtype=torch.float32)
+        return self
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
@@ -1115,10 +1252,10 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
         """
         if feature_attention_mask is not None:
             audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-        else:
-            audio_feature_lengths = None
-        feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
-    
+        elif audio_feature_lengths is None:
+            raise ValueError("Either feature_attention_mask or audio_feature_lengths must be provided")
+        feature_lens = audio_feature_lengths
+
         # audio encoder do not support batch inference to keep precision
         audio_features = []
         for input_feature, feature_len in zip(input_features, feature_lens):
@@ -1131,6 +1268,123 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
         audio_features = torch.cat(audio_features, dim=0)
 
         return audio_features
+
+    def get_ctc_logits(
+        self,
+        input_features: torch.FloatTensor,
+        feature_attention_mask: Optional[torch.LongTensor] = None,
+        audio_feature_lengths: Optional[torch.LongTensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.ctc_decoder is None or self.ctc_head is None:
+            raise RuntimeError("CTC modules are not enabled. Call `enable_ctc()` or set ctc_config.enabled=true.")
+        if feature_attention_mask is not None:
+            feature_lens = torch.sum(feature_attention_mask, dim=1)
+        elif audio_feature_lengths is not None:
+            feature_lens = audio_feature_lengths
+        else:
+            raise ValueError("Either feature_attention_mask or audio_feature_lengths must be provided")
+
+        ctc_features = []
+        for input_feature, feature_len in zip(input_features, feature_lens):
+            audio_output = self.audio_tower(
+                input_feature[:, :feature_len],
+                feature_lens=feature_len.unsqueeze(0),
+                return_ctc_hidden=True,
+            )
+            ctc_features.append(audio_output.hidden_states[0])
+
+        ctc_input_lengths = torch.tensor(
+            [feature.size(0) for feature in ctc_features], dtype=torch.long, device=input_features.device
+        )
+        padded = nn.utils.rnn.pad_sequence(ctc_features, batch_first=True)
+        ctc_dtype = next(self.ctc_decoder.parameters()).dtype
+        decoder_out, ctc_input_lengths = self.ctc_decoder(padded.to(dtype=ctc_dtype), ctc_input_lengths)
+        ctc_logits = self.ctc_head(decoder_out)
+        return ctc_logits, ctc_input_lengths
+
+    def ctc_loss(
+        self,
+        ctc_logits: torch.Tensor,
+        ctc_input_lengths: torch.Tensor,
+        ctc_labels: torch.Tensor,
+        ctc_label_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        ctc_label_lengths = ctc_label_lengths.to(device=ctc_logits.device, dtype=torch.long)
+        if ctc_labels.dim() == 2:
+            targets = [ctc_labels[i, : ctc_label_lengths[i].item()] for i in range(ctc_labels.size(0))]
+            targets = torch.cat(targets).to(device=ctc_logits.device, dtype=torch.long)
+        else:
+            targets = ctc_labels.to(device=ctc_logits.device, dtype=torch.long)
+        return F.ctc_loss(
+            ctc_logits.transpose(0, 1).float(),
+            targets,
+            ctc_input_lengths.to(device=ctc_logits.device, dtype=torch.long),
+            ctc_label_lengths,
+            blank=self.ctc_head.blank_id,
+            reduction="mean",
+            zero_infinity=True,
+        )
+
+    def decode_ctc_logits(
+        self,
+        ctc_logits: torch.Tensor,
+        ctc_input_lengths: torch.Tensor,
+        tokenizer=None,
+        return_timestamps: bool = True,
+    ) -> list[dict]:
+        results = []
+        pred_ids = ctc_logits.argmax(dim=-1)
+        blank_id = self.ctc_head.blank_id
+        for batch_idx in range(pred_ids.size(0)):
+            length = ctc_input_lengths[batch_idx].item()
+            frame_ids = pred_ids[batch_idx, :length].tolist()
+            token_ids = []
+            timestamps = []
+            prev_token = None
+            start = None
+            for frame_idx, token_id in enumerate(frame_ids):
+                if token_id == blank_id:
+                    if prev_token is not None:
+                        token_ids.append(prev_token)
+                        timestamps.append({"token": prev_token, "start_time": start * self.ctc_time_step_sec, "end_time": frame_idx * self.ctc_time_step_sec})
+                        prev_token = None
+                        start = None
+                    continue
+                if token_id != prev_token:
+                    if prev_token is not None:
+                        token_ids.append(prev_token)
+                        timestamps.append({"token": prev_token, "start_time": start * self.ctc_time_step_sec, "end_time": frame_idx * self.ctc_time_step_sec})
+                    prev_token = token_id
+                    start = frame_idx
+            if prev_token is not None:
+                token_ids.append(prev_token)
+                timestamps.append({"token": prev_token, "start_time": start * self.ctc_time_step_sec, "end_time": length * self.ctc_time_step_sec})
+
+            text = tokenizer.decode(token_ids) if tokenizer is not None else None
+            if tokenizer is not None and return_timestamps:
+                for item in timestamps:
+                    item["token"] = tokenizer.decode([item["token"]])
+            result = {"ctc_token_ids": token_ids, "ctc_text": text}
+            if return_timestamps:
+                result["ctc_timestamps"] = timestamps
+            results.append(result)
+        return results
+
+    @torch.no_grad()
+    def generate_ctc(
+        self,
+        input_features: torch.FloatTensor,
+        feature_attention_mask: Optional[torch.LongTensor] = None,
+        audio_feature_lengths: Optional[torch.LongTensor] = None,
+        tokenizer=None,
+        return_timestamps: bool = True,
+    ) -> list[dict]:
+        ctc_logits, ctc_input_lengths = self.get_ctc_logits(
+            input_features,
+            feature_attention_mask=feature_attention_mask,
+            audio_feature_lengths=audio_feature_lengths,
+        )
+        return self.decode_ctc_logits(ctc_logits, ctc_input_lengths, tokenizer=tokenizer, return_timestamps=return_timestamps)
 
     def get_placeholder_mask(
         self,
@@ -1168,6 +1422,9 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
         inputs_embeds=None,
         rope_deltas=None,
         labels=None,
+        ctc_labels=None,
+        ctc_label_lengths=None,
+        return_ctc_logits: bool = False,
         use_cache=None,
         cache_position=None,
         **kwargs,
@@ -1185,7 +1442,38 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
             Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
             config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
             (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+        ctc_labels (`torch.LongTensor` of shape `(batch_size, ctc_sequence_length)`, *optional*):
+            Padded CTC target token ids for CTC-only training.
+        ctc_label_lengths (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Valid target lengths for `ctc_labels`.
+        return_ctc_logits (`bool`, *optional*, defaults to `False`):
+            Whether to return CTC log-probabilities in the output.
+        cache_position (`torch.LongTensor`, *optional*):
+            Cache positions used during incremental generation.
         """
+
+        if ctc_labels is not None or return_ctc_logits:
+            if input_features is None:
+                raise ValueError("input_features must be provided for CTC training or decoding")
+            ctc_logits, ctc_input_lengths = self.get_ctc_logits(
+                input_features,
+                feature_attention_mask=feature_attention_mask,
+                audio_feature_lengths=audio_feature_lengths,
+            )
+            ctc_loss = None
+            if ctc_labels is not None:
+                if ctc_label_lengths is None:
+                    raise ValueError("ctc_label_lengths must be provided with ctc_labels")
+                ctc_loss = self.ctc_loss(ctc_logits, ctc_input_lengths, ctc_labels, ctc_label_lengths)
+            return Qwen3ASRThinkerCausalLMOutputWithPast(
+                loss=ctc_loss,
+                logits=None,
+                past_key_values=past_key_values,
+                rope_deltas=self.rope_deltas,
+                ctc_loss=ctc_loss,
+                ctc_logits=ctc_logits if return_ctc_logits else None,
+                ctc_input_lengths=ctc_input_lengths,
+            )
 
         if inputs_embeds is None:
             # 1. Extract the input embeddings
@@ -1317,7 +1605,16 @@ class Qwen3ASRForConditionalGeneration(Qwen3ASRPreTrainedModel, GenerationMixin)
 
         self.thinker = Qwen3ASRThinkerForConditionalGeneration._from_config(config.thinker_config)
         self.post_init()
-    
+
+    def enable_ctc(self, ctc_config: Optional[dict] = None):
+        self.thinker.enable_ctc(ctc_config)
+        if hasattr(self.config, "thinker_config"):
+            self.config.thinker_config.ctc_config = self.thinker.config.ctc_config
+        return self
+
+    def generate_ctc(self, *args, **kwargs):
+        return self.thinker.generate_ctc(*args, **kwargs)
+
     def get_support_languages(self):
         return self.config.support_languages
 
