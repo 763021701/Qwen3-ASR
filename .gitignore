@@ -20,6 +20,7 @@ wheels/
 *.egg
 .idea/
 .vscode/
+.codegraph/
 venv/
 env/
 data/
