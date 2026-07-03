@@ -22,3 +22,7 @@ wheels/
 .vscode/
 venv/
 env/
+
+# training outputs & code index (regenerable, large)
+outputs/
+.codegraph/

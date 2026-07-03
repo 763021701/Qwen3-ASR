@@ -5,7 +5,6 @@ import csv
 import json
 import math
 import os
-import re
 import time
 from typing import Dict, List
 
@@ -19,6 +18,7 @@ from finetuning.qwen3_asr_sft import (
     enable_ctc_training,
     load_ctc_tokenizer,
 )
+from finetuning.tn.normalize import normalize_ctc_text
 from qwen_asr import Qwen3ASRModel
 
 
@@ -37,7 +37,7 @@ def parse_args():
 
 
 def normalize_text(text: str) -> str:
-    return re.sub(r"\s+", "", (text or "").strip())
+    return normalize_ctc_text(text or "")
 
 
 def edit_distance(ref: str, hyp: str) -> int:

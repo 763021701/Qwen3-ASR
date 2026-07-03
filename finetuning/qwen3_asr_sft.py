@@ -196,7 +196,7 @@ def build_prefix_messages(prompt: str, audio_array):
     ]
 
 
-def make_preprocess_fn_prefix_only(processor):
+def make_preprocess_fn_prefix_only(processor, ctc: bool = False):
     def _preprocess(ex: Dict[str, Any]) -> Dict[str, Any]:
         prompt = ex.get("prompt", "")
         dummy_audio = None
@@ -204,12 +204,18 @@ def make_preprocess_fn_prefix_only(processor):
         prefix_text = processor.apply_chat_template(
             [prefix_msgs], add_generation_prompt=True, tokenize=False
         )[0]
-        return {
+        result = {
             "prompt": prompt,
             "audio": ex["audio"],
             "target": ex["text"],
             "prefix_text": prefix_text,
         }
+        if ctc:
+            # Lazy import: non-CTC finetuning never pulls in the TN deps.
+            from finetuning.tn.normalize import normalize_ctc_text
+
+            result["ctc_target"] = normalize_ctc_text(ex["text"])
+        return result
 
     return _preprocess
 
@@ -237,6 +243,7 @@ class DataCollatorForQwen3ASRFinetuning:
         audio_paths = [f["audio"] for f in features]
         prefix_texts = [f["prefix_text"] for f in features]
         targets = [f["target"] for f in features]
+        ctc_targets = [f.get("ctc_target", f["target"]) for f in features]
         audios = [load_audio(p, sr=self.sampling_rate) for p in audio_paths]
 
         prefix_inputs = self.processor(
@@ -248,7 +255,7 @@ class DataCollatorForQwen3ASRFinetuning:
         )
 
         if self.train_ctc_only:
-            prefix_inputs.update(self._build_ctc_labels(targets))
+            prefix_inputs.update(self._build_ctc_labels(ctc_targets))
             return prefix_inputs
 
         eos = self.processor.tokenizer.eos_token or ""
@@ -271,7 +278,7 @@ class DataCollatorForQwen3ASRFinetuning:
             labels[labels == pad_id] = -100
 
         full_inputs["labels"] = labels
-        full_inputs.update(self._build_ctc_labels(targets))
+        full_inputs.update(self._build_ctc_labels(ctc_targets))
         return full_inputs
 
 
@@ -397,9 +404,10 @@ def main():
             **({"validation": args_cli.eval_file} if args_cli.eval_file else {}),
         },
     )
-    ds = raw_ds.map(make_preprocess_fn_prefix_only(processor), num_proc=1)
+    ctc_enabled = ctc_tokenizer is not None
+    ds = raw_ds.map(make_preprocess_fn_prefix_only(processor, ctc=ctc_enabled), num_proc=1)
 
-    keep = {"prompt", "audio", "target", "prefix_text"}
+    keep = {"prompt", "audio", "target", "prefix_text", "ctc_target"}
     for split in ds.keys():
         drop = [c for c in ds[split].column_names if c not in keep]
         if drop:
