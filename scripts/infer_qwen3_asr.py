@@ -2,6 +2,7 @@
 # coding=utf-8
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -11,6 +12,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from qwen_asr import Qwen3ASRModel
+from qwen_asr.inference.utils import (
+    SAMPLE_RATE,
+    normalize_audios,
+    split_audio_into_chunks,
+)
 
 
 def parse_args():
@@ -30,6 +36,14 @@ def parse_args():
                         help="If 1, produce forced-alignment timestamps (requires --forced_aligner).")
     parser.add_argument("--forced_aligner", type=str, default="",
                         help="Forced aligner model path/repo id. Required when --return_time_stamps=1.")
+    parser.add_argument("--mode", choices=["full", "chunk"], default="full",
+                        help="full = one AR pass on the whole audio (default, no split since "
+                             "MAX_ASR_INPUT_SECONDS=1200); chunk = split into <=chunk_sec pieces "
+                             "via the built-in low-energy-boundary splitter, AR per chunk, concat text.")
+    parser.add_argument("--chunk_sec", type=float, default=25.0,
+                        help="Target max chunk duration in seconds (chunk mode only).")
+    parser.add_argument("--compare", action="store_true",
+                        help="Run both full and chunk modes, print results + timing side-by-side.")
     return parser.parse_args()
 
 
@@ -76,26 +90,57 @@ def infer_one(asr, audio, language, context, return_time_stamps):
     return results[0] if results else None
 
 
+def run_full(asr, audio, language, context, return_time_stamps):
+    t0 = time.perf_counter()
+    res = infer_one(asr, audio, language, context, return_time_stamps)
+    return res, time.perf_counter() - t0
+
+
+def run_chunked(asr, audio_path, chunk_sec, language, context, verbose=False):
+    """Split via built-in low-energy-boundary splitter, AR per chunk, concat text."""
+    wav = normalize_audios(audio_path)[0]
+    parts = split_audio_into_chunks(wav, SAMPLE_RATE, chunk_sec)
+    texts, detail = [], []
+    t0 = time.perf_counter()
+    for i, (cwav, offset) in enumerate(parts):
+        res = infer_one(asr, (cwav, SAMPLE_RATE), language, context, False)
+        txt = res.text if res else ""
+        texts.append(txt)
+        dur = len(cwav) / SAMPLE_RATE
+        detail.append((i, offset, dur, len(txt)))
+        if verbose:
+            print(f"  [chunk {i}] offset={offset:.2f}s dur={dur:.2f}s chars={len(txt)}")
+    return "".join(texts), time.perf_counter() - t0, detail
+
+
 def main():
     args = parse_args()
     asr = load_model(args)
-    result = infer_one(
-        asr,
-        audio=args.audio,
-        language=args.language,
-        context=args.context,
-        return_time_stamps=bool(args.return_time_stamps),
-    )
-    if result is None:
-        print("")
-        return
-    print(f"[language] {result.language}")
-    print(f"[text] {result.text}")
-    if result.time_stamps is not None and len(result.time_stamps) > 0:
-        head = result.time_stamps[0]
-        tail = result.time_stamps[-1]
-        print(f"[ts_first] {head.text!r} {head.start_time}->{head.end_time} s")
-        print(f"[ts_last ] {tail.text!r} {tail.start_time}->{tail.end_time} s")
+    rts = bool(args.return_time_stamps)
+
+    if args.compare or args.mode == "full":
+        full_res, full_dt = run_full(asr, args.audio, args.language, args.context, rts)
+        full_text = full_res.text if full_res else ""
+        print(f"[full]  time={full_dt:.2f}s chars={len(full_text)} "
+              f"lang={full_res.language if full_res else '?'}")
+        if not args.compare:
+            if full_res is not None:
+                print(f"[language] {full_res.language}")
+                print(f"[text] {full_res.text}")
+                if full_res.time_stamps and len(full_res.time_stamps) > 0:
+                    head, tail = full_res.time_stamps[0], full_res.time_stamps[-1]
+                    print(f"[ts_first] {head.text!r} {head.start_time}->{head.end_time} s")
+                    print(f"[ts_last ] {tail.text!r} {tail.start_time}->{tail.end_time} s")
+            else:
+                print("")
+            return
+
+    if args.compare or args.mode == "chunk":
+        chunk_text, chunk_dt, detail = run_chunked(
+            asr, args.audio, args.chunk_sec, args.language, args.context, verbose=True)
+        print(f"\n[chunk] chunk_sec={args.chunk_sec}s time={chunk_dt:.2f}s "
+              f"chars={len(chunk_text)} nchunks={len(detail)}")
+        print(chunk_text)
 
 
 if __name__ == "__main__":

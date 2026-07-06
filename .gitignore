@@ -26,3 +26,6 @@ env/
 # training outputs & code index (regenerable, large)
 outputs/
 .codegraph/
+
+# curriculum data (large JSONL, regenerable via scripts/prepare_curriculum_jsonl.py)
+data/

@@ -16,13 +16,16 @@
 import argparse
 import importlib.util
 import os
+import random
 import re
 import shutil
 import sys
+import wave
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import librosa
+import numpy as np
 import torch
 from datasets import load_dataset
 from qwen_asr import Qwen3ASRModel
@@ -89,7 +92,42 @@ def find_latest_checkpoint(output_dir: str) -> Optional[str]:
     return best_path
 
 
+def _is_piece_list_spec(s: str) -> bool:
+    """A curriculum ``audio`` field is a ``;``-joined piece-list (W|.. / S|..)."""
+    return s.split("|", 1)[0] in ("W", "S")
+
+
+def _load_piece_list(spec: str, sr: int = 16000) -> np.ndarray:
+    """Decode a piece-list spec to a mono float32 waveform in [-1, 1].
+
+    Pieces: ``W|<wav>|<start_sec>|<end_sec>`` reads PCM frames [start, end);
+    ``S|<secs>`` synthesizes silence. All source wavs are 16kHz mono 16-bit, so
+    pieces concatenate directly (no resampling). See curriculum/FORMAT.md.
+    """
+    pcm = bytearray()
+    for piece in spec.split(";"):
+        parts = piece.split("|")
+        kind = parts[0]
+        if kind == "W":
+            path, start, end = parts[1], float(parts[2]), float(parts[3])
+            with wave.open(path, "rb") as w:
+                if w.getframerate() != sr or w.getsampwidth() != 2 or w.getnchannels() != 1:
+                    raise ValueError(
+                        f"{path}: expected {sr}Hz mono 16-bit, got "
+                        f"{w.getframerate()}Hz {w.getnchannels()}ch {w.getsampwidth() * 8}-bit"
+                    )
+                w.setpos(int(round(start * sr)))
+                pcm += w.readframes(int(round((end - start) * sr)))
+        elif kind == "S":
+            pcm += b"\x00" * (int(round(float(parts[1]) * sr)) * 2)  # int16 zeros
+        else:
+            raise ValueError(f"unknown piece kind {kind!r} in {piece!r}")
+    return np.frombuffer(bytes(pcm), dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def load_audio(path: str, sr: int = 16000):
+    if _is_piece_list_spec(path):
+        return _load_piece_list(path, sr)
     wav, _ = librosa.load(path, sr=sr, mono=True)
     return wav
 
@@ -189,6 +227,40 @@ def enable_ctc_training(model, vocab_path: str):
     return ctc_config
 
 
+def _reload_ctc_weights_if_present(model, model_path: str) -> bool:
+    """Reload ctc_decoder/ctc_head weights saved under ``model_path``.
+
+    ``enable_ctc_training`` rebuilds the CTC modules with fresh random weights
+    (no guard in ``_build_ctc_modules``), and checkpoint configs lack
+    ``ctc_config.enabled`` so ``from_pretrained`` drops the ``thinker.ctc_*``
+    keys. When continuing from a prior CTC checkpoint (curriculum stages 2-4)
+    we must reload them here. No-op when ``model_path`` has no CTC keys (stage 1
+    from base). Mirrors ``scripts/infer_qwen3_asr_ctc.py:load_ctc_checkpoint``.
+    """
+    import glob
+    from safetensors import safe_open
+
+    shards = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+    if not shards:
+        return False
+    thinker = model.thinker if hasattr(model, "thinker") else model
+    decoder_state, head_state, found = {}, {}, False
+    for shard in shards:
+        with safe_open(shard, framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                if key.startswith("thinker.ctc_decoder."):
+                    decoder_state[key[len("thinker.ctc_decoder."):]] = handle.get_tensor(key)
+                    found = True
+                elif key.startswith("thinker.ctc_head."):
+                    head_state[key[len("thinker.ctc_head."):]] = handle.get_tensor(key)
+                    found = True
+    if not found:
+        return False
+    thinker.ctc_decoder.load_state_dict(decoder_state, strict=True)
+    thinker.ctc_head.load_state_dict(head_state, strict=True)
+    return True
+
+
 def build_prefix_messages(prompt: str, audio_array):
     return [
         {"role": "system", "content": prompt or ""},
@@ -210,6 +282,11 @@ def make_preprocess_fn_prefix_only(processor, ctc: bool = False):
             "target": ex["text"],
             "prefix_text": prefix_text,
         }
+        # Carry through sampler columns when present (curriculum mode).
+        if "dur_bucket" in ex:
+            result["dur_bucket"] = ex["dur_bucket"]
+        if "duration" in ex:
+            result["duration"] = ex["duration"]
         if ctc:
             # Lazy import: non-CTC finetuning never pulls in the TN deps.
             from finetuning.tn.normalize import normalize_ctc_text
@@ -282,6 +359,45 @@ class DataCollatorForQwen3ASRFinetuning:
         return full_inputs
 
 
+class BucketBatchSampler:
+    """Batches grouped by ``dur_bucket`` with per-bucket batch sizes.
+
+    Each batch holds samples from one dur_bucket only, so audio padding stays
+    tight and long-bucket batches stay small (the CTC decoder is full-attention,
+    so 300s samples need a small batch). Bucket indices are shuffled within each
+    bucket and the batch order is shuffled. With one epoch per curriculum stage
+    the order is drawn once from ``seed``.
+    """
+
+    def __init__(self, dataset, bucket_bs: Dict[str, int], seed: int = 0):
+        self.bucket_bs = bucket_bs
+        self.default_bs = bucket_bs.get("<=30", 16)
+        self.buckets: Dict[str, List[int]] = {}
+        for i, b in enumerate(dataset["dur_bucket"]):
+            self.buckets.setdefault(b or "<=30", []).append(i)
+        self.seed = seed
+
+    def __iter__(self):
+        rng = random.Random(self.seed)
+        batches: List[List[int]] = []
+        for bucket, idxs in self.buckets.items():
+            bs = self.bucket_bs.get(bucket, self.default_bs)
+            order = list(idxs)
+            rng.shuffle(order)
+            for i in range(0, len(order), bs):
+                batches.append(order[i:i + bs])
+        rng.shuffle(batches)
+        for b in batches:
+            yield b
+
+    def __len__(self):
+        total = 0
+        for bucket, idxs in self.buckets.items():
+            bs = self.bucket_bs.get(bucket, self.default_bs)
+            total += (len(idxs) + bs - 1) // bs
+        return total
+
+
 class CastFloatInputsTrainer(Trainer):
     def _prepare_inputs(self, inputs):
         inputs = super()._prepare_inputs(inputs)
@@ -291,6 +407,29 @@ class CastFloatInputsTrainer(Trainer):
                 if torch.is_tensor(v) and v.is_floating_point():
                     inputs[k] = v.to(dtype=model_dtype)
         return inputs
+
+    def get_train_dataloader(self):
+        if not getattr(self, "use_bucket_sampler", False):
+            return super().get_train_dataloader()
+        from torch.utils.data import DataLoader
+        sampler = BucketBatchSampler(
+            self.train_dataset, self.bucket_bs, seed=self.args.seed
+        )
+        return DataLoader(
+            self.train_dataset,
+            batch_sampler=sampler,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            persistent_workers=(
+                self.args.dataloader_persistent_workers
+                if self.args.dataloader_num_workers > 0 else False
+            ),
+            prefetch_factor=(
+                self.args.dataloader_prefetch_factor
+                if self.args.dataloader_num_workers > 0 else None
+            ),
+        )
 
 
 def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
@@ -327,6 +466,18 @@ class MakeEveryCheckpointInferableCallback(TrainerCallback):
 
         copy_required_hf_files_for_qwen_asr(self.base_model_path, ckpt_dir)
         return control
+
+
+def _parse_bucket_bs(s: str) -> Dict[str, int]:
+    """Parse ``<=30:32,30-60:16,...`` into a dict."""
+    out: Dict[str, int] = {}
+    for item in s.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        k, v = item.rsplit(":", 1)
+        out[k.strip()] = int(v)
+    return out
 
 
 def parse_args():
@@ -370,6 +521,13 @@ def parse_args():
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--resume", type=int, default=0)
 
+    # Curriculum bucketing (group batches by dur_bucket with per-bucket sizes)
+    p.add_argument("--curriculum_bucket", type=int, default=0,
+                   help="1=group batches by dur_bucket using --bucket_bs (needs dur_bucket column)")
+    p.add_argument("--bucket_bs", type=str,
+                   default="<=30:32,30-60:16,60-120:8,120-300:4",
+                   help="per-bucket batch sizes, e.g. '<=30:32,30-60:16,60-120:8,120-300:4'")
+
     return p.parse_args()
 
 
@@ -396,6 +554,8 @@ def main():
         ctc_vocab_path = args_cli.ctc_vocab_path or default_ctc_vocab_path()
         ctc_tokenizer = load_ctc_tokenizer(ctc_vocab_path, args_cli.funasr_path)
         enable_ctc_training(model, ctc_vocab_path)
+        if _reload_ctc_weights_if_present(model, args_cli.model_path):
+            print(f"[ctc] reloaded ctc_decoder/ctc_head weights from {args_cli.model_path}")
 
     raw_ds = load_dataset(
         "json",
@@ -407,7 +567,7 @@ def main():
     ctc_enabled = ctc_tokenizer is not None
     ds = raw_ds.map(make_preprocess_fn_prefix_only(processor, ctc=ctc_enabled), num_proc=1)
 
-    keep = {"prompt", "audio", "target", "prefix_text", "ctc_target"}
+    keep = {"prompt", "audio", "target", "prefix_text", "ctc_target", "dur_bucket", "duration"}
     for split in ds.keys():
         drop = [c for c in ds[split].column_names if c not in keep]
         if drop:
@@ -456,6 +616,8 @@ def main():
         tokenizer=processor.tokenizer,
         callbacks=[MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)],
     )
+    trainer.use_bucket_sampler = (args_cli.curriculum_bucket == 1)
+    trainer.bucket_bs = _parse_bucket_bs(args_cli.bucket_bs) if trainer.use_bucket_sampler else {}
 
     resume_from = (args_cli.resume_from or "").strip()
     if not resume_from and args_cli.resume == 1:
