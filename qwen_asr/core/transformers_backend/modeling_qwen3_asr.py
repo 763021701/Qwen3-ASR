@@ -14,7 +14,7 @@
 # limitations under the License.
 import math
 from dataclasses import dataclass
-from typing import Callable, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import numpy as np
 import torch
@@ -1271,30 +1271,37 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
 
     def get_ctc_logits(
         self,
-        input_features: torch.FloatTensor,
+        input_features: Optional[torch.FloatTensor] = None,
         feature_attention_mask: Optional[torch.LongTensor] = None,
         audio_feature_lengths: Optional[torch.LongTensor] = None,
+        ctc_hidden_states: Optional[List[torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.ctc_decoder is None or self.ctc_head is None:
             raise RuntimeError("CTC modules are not enabled. Call `enable_ctc()` or set ctc_config.enabled=true.")
-        if feature_attention_mask is not None:
-            feature_lens = torch.sum(feature_attention_mask, dim=1)
-        elif audio_feature_lengths is not None:
-            feature_lens = audio_feature_lengths
+        if ctc_hidden_states is None:
+            if feature_attention_mask is not None:
+                feature_lens = torch.sum(feature_attention_mask, dim=1)
+            elif audio_feature_lengths is not None:
+                feature_lens = audio_feature_lengths
+            else:
+                raise ValueError("Either feature_attention_mask or audio_feature_lengths must be provided")
+            if input_features is None:
+                raise ValueError("input_features must be provided when ctc_hidden_states is None")
+            ctc_features = []
+            for input_feature, feature_len in zip(input_features, feature_lens):
+                audio_output = self.audio_tower(
+                    input_feature[:, :feature_len],
+                    feature_lens=feature_len.unsqueeze(0),
+                    return_ctc_hidden=True,
+                )
+                ctc_features.append(audio_output.hidden_states[0])
+            device = input_features.device
         else:
-            raise ValueError("Either feature_attention_mask or audio_feature_lengths must be provided")
-
-        ctc_features = []
-        for input_feature, feature_len in zip(input_features, feature_lens):
-            audio_output = self.audio_tower(
-                input_feature[:, :feature_len],
-                feature_lens=feature_len.unsqueeze(0),
-                return_ctc_hidden=True,
-            )
-            ctc_features.append(audio_output.hidden_states[0])
+            ctc_features = list(ctc_hidden_states)
+            device = ctc_features[0].device if ctc_features else torch.device("cpu")
 
         ctc_input_lengths = torch.tensor(
-            [feature.size(0) for feature in ctc_features], dtype=torch.long, device=input_features.device
+            [feature.size(0) for feature in ctc_features], dtype=torch.long, device=device
         )
         padded = nn.utils.rnn.pad_sequence(ctc_features, batch_first=True)
         ctc_dtype = next(self.ctc_decoder.parameters()).dtype
@@ -1427,6 +1434,7 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
         return_ctc_logits: bool = False,
         use_cache=None,
         cache_position=None,
+        audio_features=None,
         **kwargs,
     ) -> Union[tuple, Qwen3ASRThinkerCausalLMOutputWithPast]:
         r"""
@@ -1450,6 +1458,11 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
             Whether to return CTC log-probabilities in the output.
         cache_position (`torch.LongTensor`, *optional*):
             Cache positions used during incremental generation.
+        audio_features (`torch.FloatTensor`, *optional*):
+            Precomputed audio embeddings (post-projection `last_hidden_state` from
+            `audio_tower`). If provided, skips `get_audio_features` so no audio_tower
+            forward runs in the LLM path — used for shared-forward CTC+LLM inference
+            where audio_tower is called once and its output feeds both branches.
         """
 
         if ctc_labels is not None or return_ctc_logits:
@@ -1480,12 +1493,13 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
         # 2. Merge text, audios
-        if input_features is not None:
+        if audio_features is None and input_features is not None:
             audio_features = self.get_audio_features(
                 input_features,
                 feature_attention_mask=feature_attention_mask,
                 audio_feature_lengths=audio_feature_lengths,
             )
+        if audio_features is not None:
             audio_features = audio_features.to(inputs_embeds.device, inputs_embeds.dtype)
             audio_mask = self.get_placeholder_mask(input_ids, inputs_embeds=inputs_embeds)
             inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_features)
@@ -1554,6 +1568,7 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
         use_cache=True,
         input_features=None,
         feature_attention_mask=None,
+        audio_features=None,
         **kwargs,
     ):
         model_inputs = super().prepare_inputs_for_generation(
@@ -1573,6 +1588,9 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
 
         if cache_position[0] != 0:
             model_inputs["input_features"] = None
+            model_inputs.pop("audio_features", None)
+        elif audio_features is not None:
+            model_inputs["audio_features"] = audio_features
 
         return model_inputs
 
@@ -1636,7 +1654,7 @@ class Qwen3ASRForConditionalGeneration(Qwen3ASRPreTrainedModel, GenerationMixin)
             # Process special input values
             if key == "feature_attention_mask":
                 thinker_kwargs[key] = value
-            elif key in ("input_features", "attention_mask"):
+            elif key in ("input_features", "attention_mask", "audio_features"):
                 thinker_kwargs[key] = value
             # Put other key to shared kwargs
             else:
