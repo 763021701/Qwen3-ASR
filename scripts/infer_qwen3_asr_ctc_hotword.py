@@ -55,7 +55,7 @@ def parse_args():
     p.add_argument("--ctc_topk", type=int, default=30)
     p.add_argument("--max_hotwords", type=int, default=32)
     p.add_argument("--context_format", choices=["space", "comma", "structured", "nano_style"],
-                   default="nano_style")
+                   default="space")
     p.add_argument("--ctc_slice_threshold_sec", type=float, default=60.0,
                    help="Audio longer than this slices pre-proj for the CTC decoder "
                         "(bounds O(N^2) attention memory). <= this -> whole CTC.")
