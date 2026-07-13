@@ -346,12 +346,15 @@ class DataCollatorForQwen3ASRFinetuning:
 
         prefix_lens = prefix_inputs["attention_mask"].sum(dim=1).tolist()
         labels = full_inputs["input_ids"].clone()
-        for i, pl in enumerate(prefix_lens):
-            labels[i, :pl] = -100
-
-        pad_id = self.processor.tokenizer.pad_token_id
-        if pad_id is not None:
-            labels[labels == pad_id] = -100
+        # The processor may left-pad (real tokens right-aligned), so the prefix
+        # does NOT start at position 0. Mask the prefix at the first real token,
+        # and mask all padding via attention_mask (the pad token may be
+        # <|audio_pad|>, not pad_token_id, so an id-based mask would miss it).
+        attn = full_inputs["attention_mask"]
+        starts = (attn == 1).long().argmax(dim=1).tolist()
+        for i, (pl, st) in enumerate(zip(prefix_lens, starts)):
+            labels[i, st : st + pl] = -100
+        labels[attn == 0] = -100
 
         full_inputs["labels"] = labels
         return full_inputs
