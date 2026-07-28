@@ -311,6 +311,32 @@ def _balanced_multilingual_prepare_command(dataset: Dict[str, Any], paths: Dict[
             cmd.extend([flag, abspath(val)])
     return cmd
 
+def _pathology_en_prepare_command(dataset: Dict[str, Any], paths: Dict[str, str]) -> List[str]:
+    source = str(dataset.get("source") or "").strip()
+    if not source:
+        raise ValueError("pathology_en_jsonl requires dataset.source.")
+    script = abspath("tools/prepare_pathology_en.py")
+    output_dir = os.path.dirname(paths["train"])
+    return [
+        sys.executable,
+        script,
+        "--input_jsonl",
+        abspath(source),
+        "--output_dir",
+        output_dir,
+        "--train_jsonl",
+        paths["train"],
+        "--dev_jsonl",
+        paths["dev"],
+        "--train_ratio",
+        str(float(dataset.get("train_ratio", 0.95))),
+        "--dev_ratio",
+        str(float(dataset.get("dev_ratio", 0.05))),
+        "--seed",
+        str(int(dataset.get("split_seed", 42))),
+        "--check_audio",
+        str(int(dataset.get("check_audio", 1))),
+    ]
 
 def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
     dataset = config.get("dataset", {})
@@ -325,6 +351,9 @@ def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
     source_type = str(dataset.get("source_type", "")).strip()
     if source_type == "balanced_multilingual":
         run_command(_balanced_multilingual_prepare_command(dataset, paths), dry_run=dry_run)
+        return paths
+    if source_type == "pathology_en_jsonl":
+        run_command(_pathology_en_prepare_command(dataset, paths), dry_run=dry_run)
         return paths
 
     commands = _split_convert_commands(dataset, language, paths)
@@ -384,7 +413,9 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
     if not dry_run:
         save_resolved_config(config, output_dir)
 
-    train_script = abspath("finetuning/qwen3_asr_sft.py")
+    use_lora = int(training.get("use_lora", 0)) == 1
+    script_name = "qwen3_asr_sft_lora.py" if use_lora else "qwen3_asr_sft.py"
+    train_script = abspath(os.path.join("finetuning", script_name))
     launcher = str(runtime.get("launcher", "python")).strip()
     if launcher == "torchrun":
         nproc = str(runtime.get("nproc_per_node", 1))
@@ -401,6 +432,9 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "freeze_audio_tower": "--freeze_audio_tower",
         "save_steps": "--save_steps",
         "save_total_limit": "--save_total_limit",
+        "save_best_total_limit": "--save_best_total_limit",
+        "early_stopping_patience": "--early_stopping_patience",
+        "early_stopping_threshold": "--early_stopping_threshold",
         "log_steps": "--log_steps",
         "sr": "--sr",
         "num_workers": "--num_workers",

@@ -30,7 +30,7 @@ def main():
     parser.add_argument(
         "--backend",
         type=str,
-        default="vllm",
+        default="transformers",
         choices=["vllm", "transformers"],
         help="Backend: vllm or transformers (default: vllm)",
     )

@@ -17,6 +17,8 @@
 # For full-parameter fine-tuning, see finetuning/qwen3_asr_sft.py.
 import argparse
 import os
+import json
+import math
 import random
 import re
 import shutil
@@ -163,6 +165,7 @@ def make_preprocess_fn_prefix_only(processor):
             "audio": ex["audio"],
             "target": ex["text"],
             "prefix_text": prefix_text,
+            "aug": ex.get("aug", 1),
         }
 
     return _preprocess
@@ -318,9 +321,9 @@ class DataCollatorForQwen3ASRFinetuning:
         rng = random.Random() if use_aug else None
 
         audios = []
-        for p in audio_paths:
+        for p, feat in zip(audio_paths, features):
             wav = load_audio(p, sr=self.sampling_rate)
-            if use_aug:
+            if use_aug and int(feat.get("aug", 1)) == 1:
                 wav = augment_waveform(wav, self.sampling_rate, cfg, rng)
             audios.append(wav)
 
@@ -340,9 +343,10 @@ class DataCollatorForQwen3ASRFinetuning:
         )
 
         if use_aug and "input_features" in full_inputs:
-            full_inputs["input_features"] = apply_specaugment(
-                full_inputs["input_features"], cfg, rng
-            )
+            feats = full_inputs["input_features"]
+            for i, feat in enumerate(features):
+                if int(feat.get("aug", 1)) == 1:
+                    feats[i] = apply_specaugment(feats[i], cfg, rng)
 
         prefix_lens = prefix_inputs["attention_mask"].sum(dim=1).tolist()
         labels = full_inputs["input_ids"].clone()
@@ -400,8 +404,12 @@ class CastFloatInputsTrainer(Trainer):
         model = model or self.model
         adapter_path = os.path.join(resume_from_checkpoint, "adapter_model.safetensors")
         if os.path.isfile(adapter_path):
+            from peft import set_peft_model_state_dict
             from safetensors.torch import load_file as safe_load_file
-            model.thinker.load_state_dict(safe_load_file(adapter_path), strict=False)
+            set_peft_model_state_dict(
+                model.thinker, safe_load_file(adapter_path), adapter_name="default"
+            )
+            print(f"[resume] loaded LoRA adapter weights from {adapter_path}")
             return
         return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
 
@@ -481,6 +489,133 @@ class MakeEveryCheckpointInferableCallback(TrainerCallback):
         copy_required_hf_files_for_qwen_asr(self.base_model_path, ckpt_dir)
         return control
 
+class KeepBestCheckpointsCallback(TrainerCallback):
+    """Keep only the checkpoints with the lowest validation losses."""
+
+    ranking_filename = "best_checkpoints.json"
+
+    def __init__(self, limit: int):
+        if limit < 1:
+            raise ValueError("Best-checkpoint limit must be positive.")
+        self.limit = limit
+        self.eval_losses: Dict[int, float] = {}
+    def on_train_begin(self, args, state, control, **kwargs):
+        if args.process_index != 0:
+            return control
+        path = os.path.join(args.output_dir, self.ranking_filename)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for item in data.get("checkpoints", []):
+                self.eval_losses[int(item["step"])] = float(item["eval_loss"])
+        return control
+
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if args.process_index != 0 or not metrics:
+            return control
+        loss = metrics.get("eval_loss")
+        if loss is not None and math.isfinite(float(loss)):
+            self.eval_losses[int(state.global_step)] = float(loss)
+        return control
+
+    def _write_ranking(self, output_dir: str, ranked: List[Tuple[float, int, str]]) -> None:
+        path = os.path.join(output_dir, self.ranking_filename)
+        tmp_path = path + ".tmp"
+        payload = {
+            "metric": "eval_loss",
+            "greater_is_better": False,
+            "limit": self.limit,
+            "checkpoints": [
+                {
+                    "rank": rank,
+                    "step": step,
+                    "eval_loss": loss,
+                    "path": os.path.abspath(ckpt_dir),
+                }
+                for rank, (loss, step, ckpt_dir) in enumerate(ranked, start=1)
+            ],
+        }
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+
+    def on_save(self, args, state, control, **kwargs):
+        if args.process_index != 0:
+            return control
+
+        ranked = []
+        for step, loss in self.eval_losses.items():
+            ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{step}")
+            if os.path.isdir(ckpt_dir):
+                ranked.append((loss, step, ckpt_dir))
+        ranked.sort()
+
+        for _, step, ckpt_dir in ranked[self.limit:]:
+            shutil.rmtree(ckpt_dir)
+            print(
+                f"[best-checkpoints] removed checkpoint-{step}; "
+                f"outside best {self.limit} by eval_loss"
+            )
+
+        kept = ranked[: self.limit]
+        self._write_ranking(args.output_dir, kept)
+        summary = ", ".join(
+            f"checkpoint-{step}={loss:.6f}" for loss, step, _ in kept
+        )
+        print(f"[best-checkpoints] retained: {summary}")
+        return control
+class StopOnEvalLossPlateauCallback(TrainerCallback):
+    """Stop after repeated evals without a meaningful eval-loss improvement."""
+
+    def __init__(self, patience: int, threshold: float):
+        if patience < 1:
+            raise ValueError("Early-stopping patience must be positive.")
+        self.patience = patience
+        self.threshold = threshold
+        self.best_loss: Optional[float] = None
+        self.bad_evals = 0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        path = os.path.join(args.output_dir, KeepBestCheckpointsCallback.ranking_filename)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            losses = [
+                float(item["eval_loss"])
+                for item in data.get("checkpoints", [])
+                if item.get("eval_loss") is not None
+            ]
+            if losses:
+                self.best_loss = min(losses)
+                print(f"[early-stop] restored best eval_loss={self.best_loss:.6f}")
+        return control
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if not metrics or metrics.get("eval_loss") is None:
+            return control
+        loss = float(metrics["eval_loss"])
+        improved = self.best_loss is None or loss < self.best_loss - self.threshold
+        if improved:
+            self.best_loss = loss
+            self.bad_evals = 0
+        else:
+            self.bad_evals += 1
+        print(
+            f"[early-stop] step={state.global_step} eval_loss={loss:.6f} "
+            f"best={self.best_loss:.6f} bad_evals={self.bad_evals}/{self.patience}"
+        )
+        if self.bad_evals >= self.patience:
+            control.should_training_stop = True
+            print("[early-stop] convergence criterion reached; stopping training.")
+        return control
+
+
+
+
+
+
 def parse_args():
     p = argparse.ArgumentParser("Qwen3-ASR LoRA Finetuning")
 
@@ -512,6 +647,14 @@ def parse_args():
     p.add_argument("--save_strategy", type=str, default="steps")
     p.add_argument("--save_steps", type=int, default=200)
     p.add_argument("--save_total_limit", type=int, default=5)
+    p.add_argument(
+        "--save_best_total_limit",
+        type=int,
+        default=0,
+        help="When >0 with --eval_file, retain only this many checkpoints with the lowest eval_loss.",
+    )
+    p.add_argument("--early_stopping_patience", type=int, default=0)
+    p.add_argument("--early_stopping_threshold", type=float, default=0.0)
 
     # Resume
     p.add_argument("--resume_from", type=str, default="")
@@ -583,7 +726,7 @@ def main():
     )
     ds = raw_ds.map(make_preprocess_fn_prefix_only(processor), num_proc=1)
 
-    keep = {"prompt", "audio", "target", "prefix_text"}
+    keep = {"prompt", "audio", "target", "prefix_text", "aug"}
     for split in ds.keys():
         drop = [c for c in ds[split].column_names if c not in keep]
         if drop:
@@ -601,6 +744,10 @@ def main():
         augment=None,
     )
 
+    keep_best_limit = args_cli.save_best_total_limit if args_cli.eval_file else 0
+    if args_cli.save_best_total_limit > 0 and not args_cli.eval_file:
+        raise ValueError("--save_best_total_limit requires --eval_file")
+
     training_args = TrainingArguments(
         output_dir=args_cli.output_dir,
         per_device_train_batch_size=args_cli.batch_size,
@@ -616,7 +763,7 @@ def main():
         dataloader_prefetch_factor=args_cli.prefetch_factor if args_cli.num_workers > 0 else None,
         save_strategy=args_cli.save_strategy,
         save_steps=args_cli.save_steps,
-        save_total_limit=args_cli.save_total_limit,
+        save_total_limit=None if keep_best_limit > 0 else args_cli.save_total_limit,
         save_safetensors=True,
         eval_strategy="steps" if args_cli.eval_file else "no",
         eval_steps=args_cli.save_steps if args_cli.eval_file else None,
@@ -629,6 +776,17 @@ def main():
     )
 
     callbacks = [MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)]
+    if keep_best_limit > 0:
+        callbacks.append(KeepBestCheckpointsCallback(limit=keep_best_limit))
+    if args_cli.early_stopping_patience > 0:
+        if not args_cli.eval_file:
+            raise ValueError("--early_stopping_patience requires --eval_file")
+        callbacks.append(
+            StopOnEvalLossPlateauCallback(
+                patience=args_cli.early_stopping_patience,
+                threshold=args_cli.early_stopping_threshold,
+            )
+        )
 
     trainer = CastFloatInputsTrainer(
         model=model,
