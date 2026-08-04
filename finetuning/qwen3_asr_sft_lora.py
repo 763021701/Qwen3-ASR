@@ -33,6 +33,15 @@ from qwen_asr import Qwen3ASRModel
 from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
 
+if __package__:
+    from .noise_augmentation import NoiseLibrary, maybe_add_noise
+    from .nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
+    from .processor_collate import build_processor_batch_inputs
+else:
+    from noise_augmentation import NoiseLibrary, maybe_add_noise
+    from nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
+    from processor_collate import build_processor_batch_inputs
+
 LORA_TARGETS = {
     "encoder": r"^audio_tower\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$",
     "aligner": r"^audio_tower\.(conv_out|proj1|proj2)$",
@@ -187,13 +196,16 @@ class AudioAugmentConfig:
     noise_prob: float = 0.5
     noise_snr_min: float = 5.0
     noise_snr_max: float = 20.0
+    noise_dir: str = ""
     specaug_prob: float = 0.5
     specaug_time_mask_param: int = 50
     specaug_freq_mask_param: int = 27
     specaug_num_time_masks: int = 2
     specaug_num_freq_masks: int = 2
+    nospeech: NoSpeechAugmentConfig = field(default_factory=NoSpeechAugmentConfig)
 
     _specaug_masks: Any = field(default=None, repr=False, compare=False)
+    noise_library: Optional[NoiseLibrary] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if not self.enabled:
@@ -206,6 +218,7 @@ class AudioAugmentConfig:
                 "pip install --no-deps 'torchaudio==2.8.0+cu128' "
                 "--index-url https://download.pytorch.org/whl/cu128"
             ) from e
+        self.noise_library = NoiseLibrary.from_dir(self.noise_dir)
         self._specaug_masks = _build_specaug_transforms(self)
 
     @classmethod
@@ -220,11 +233,13 @@ class AudioAugmentConfig:
             noise_prob=float(getattr(args, "noise_prob", 0.5)),
             noise_snr_min=float(getattr(args, "noise_snr_min", 5.0)),
             noise_snr_max=float(getattr(args, "noise_snr_max", 20.0)),
+            noise_dir=str(getattr(args, "noise_dir", "") or ""),
             specaug_prob=float(getattr(args, "specaug_prob", 0.5)),
             specaug_time_mask_param=int(getattr(args, "specaug_time_mask_param", 50)),
             specaug_freq_mask_param=int(getattr(args, "specaug_freq_mask_param", 27)),
             specaug_num_time_masks=int(getattr(args, "specaug_num_time_masks", 2)),
             specaug_num_freq_masks=int(getattr(args, "specaug_num_freq_masks", 2)),
+            nospeech=NoSpeechAugmentConfig.from_args(args),
         )
 
 def _build_specaug_transforms(cfg: AudioAugmentConfig):
@@ -252,20 +267,6 @@ def apply_speed_perturbation(wav: np.ndarray, sr: int, factor: float) -> np.ndar
     out = torchaudio.functional.resample(w, sr, new_sr)
     return out.squeeze(0).numpy().astype(np.float32)
 
-def apply_add_noise(wav: np.ndarray, snr_db: float) -> np.ndarray:
-    """Mix synthetic white noise at the given SNR (dB)."""
-    signal = torch.from_numpy(wav).float()
-    noise = torch.randn_like(signal)
-    signal_power = signal.pow(2).mean().clamp(min=1e-10)
-    noise_power = noise.pow(2).mean().clamp(min=1e-10)
-    snr_linear = 10 ** (snr_db / 10.0)
-    scale = torch.sqrt(signal_power / (noise_power * snr_linear))
-    mixed = signal + noise * scale
-    peak = mixed.abs().max()
-    if peak > 1.0:
-        mixed = mixed / peak
-    return mixed.numpy().astype(np.float32)
-
 def augment_waveform(
     wav: np.ndarray, sr: int, cfg: AudioAugmentConfig, rng: random.Random
 ) -> np.ndarray:
@@ -275,10 +276,15 @@ def augment_waveform(
     if rng.random() < cfg.speed_prob:
         factor = rng.choice(cfg.speed_factors)
         out = apply_speed_perturbation(out, sr, factor)
-    if rng.random() < cfg.noise_prob:
-        lo, hi = cfg.noise_snr_min, cfg.noise_snr_max
-        snr = rng.uniform(min(lo, hi), max(lo, hi))
-        out = apply_add_noise(out, snr)
+    out = maybe_add_noise(
+        out,
+        sr,
+        rng,
+        prob=cfg.noise_prob,
+        snr_min=cfg.noise_snr_min,
+        snr_max=cfg.noise_snr_max,
+        library=cfg.noise_library,
+    )
     return out
 
 def apply_specaugment(features: torch.Tensor, cfg: AudioAugmentConfig, rng: random.Random) -> torch.Tensor:
@@ -313,33 +319,36 @@ class DataCollatorForQwen3ASRFinetuning:
         prefix_texts = [f["prefix_text"] for f in features]
         targets = [f["target"] for f in features]
 
-        eos = self.processor.tokenizer.eos_token or ""
-        full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
-
         cfg = self.augment
         use_aug = cfg is not None and cfg.enabled
         rng = random.Random() if use_aug else None
 
-        audios = []
-        for p, feat in zip(audio_paths, features):
-            wav = load_audio(p, sr=self.sampling_rate)
-            if use_aug and int(feat.get("aug", 1)) == 1:
-                wav = augment_waveform(wav, self.sampling_rate, cfg, rng)
-            audios.append(wav)
+        audios = [load_audio(p, sr=self.sampling_rate) for p in audio_paths]
+        aug_flags = [int(f.get("aug", 1)) for f in features]
 
-        full_inputs = self.processor(
-            text=full_texts,
-            audio=audios,
-            return_tensors="pt",
-            padding=True,
-            truncation=False,
-        )
-        prefix_inputs = self.processor(
-            text=prefix_texts,
-            audio=audios,
-            return_tensors="pt",
-            padding=True,
-            truncation=False,
+        if use_aug and cfg.nospeech.enabled:
+            audios, targets = apply_nospeech_augment(
+                audios,
+                targets,
+                aug_flags,
+                rng,
+                cfg.nospeech,
+                self.sampling_rate,
+            )
+
+        eos = self.processor.tokenizer.eos_token or ""
+        full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
+
+        if use_aug:
+            audios = [
+                augment_waveform(wav, self.sampling_rate, cfg, rng)
+                if aug == 1
+                else wav
+                for wav, aug in zip(audios, aug_flags)
+            ]
+
+        full_inputs, prefix_inputs = build_processor_batch_inputs(
+            self.processor, full_texts, prefix_texts, audios
         )
 
         if use_aug and "input_features" in full_inputs:
@@ -668,11 +677,25 @@ def parse_args():
     p.add_argument("--noise_prob", type=float, default=0.5)
     p.add_argument("--noise_snr_min", type=float, default=5.0)
     p.add_argument("--noise_snr_max", type=float, default=20.0)
+    p.add_argument(
+        "--noise_dir",
+        type=str,
+        default="",
+        help="Directory of real noise wavs (e.g. DNS-Challenge noise_fullband). "
+        "When set, AddNoise samples real noise files instead of synthetic white noise.",
+    )
     p.add_argument("--specaug_prob", type=float, default=0.5)
     p.add_argument("--specaug_time_mask_param", type=int, default=50)
     p.add_argument("--specaug_freq_mask_param", type=int, default=27)
     p.add_argument("--specaug_num_time_masks", type=int, default=2)
     p.add_argument("--specaug_num_freq_masks", type=int, default=2)
+
+    # No-speech segment augmentation (train only; default off)
+    p.add_argument("--nospeech_augment", type=int, default=0, choices=(0, 1))
+    p.add_argument("--nospeech_prob", type=float, default=0.3)
+    p.add_argument("--nospeech_pad_min_sec", type=float, default=0.5)
+    p.add_argument("--nospeech_pad_max_sec", type=float, default=3.0)
+    p.add_argument("--nospeech_dual_max_speech_sec", type=float, default=30.0)
 
     # LoRA (default off)
     p.add_argument("--use_lora", type=int, default=0, choices=(0, 1))
@@ -807,6 +830,17 @@ def main():
             "[augment] enabled: speed_prob=%s noise_prob=%s specaug_prob=%s"
             % (augment_cfg.speed_prob, augment_cfg.noise_prob, augment_cfg.specaug_prob)
         )
+        if augment_cfg.noise_library is not None and augment_cfg.noise_library.enabled:
+            print(
+                "[augment] noise_dir=%s files=%d"
+                % (augment_cfg.noise_dir, augment_cfg.noise_library.num_files)
+            )
+        if augment_cfg.nospeech.enabled:
+            ns = augment_cfg.nospeech
+            print(
+                "[augment] nospeech_prob=%s pad=%.1f-%.1fs dual_max=%.1fs"
+                % (ns.prob, ns.pad_min_sec, ns.pad_max_sec, ns.dual_max_speech_sec)
+            )
 
     resume_from = (args_cli.resume_from or "").strip()
     if not resume_from and args_cli.resume == 1:

@@ -23,6 +23,7 @@ import os
 import random
 import re
 import shutil
+import string
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,7 +36,23 @@ from qwen_asr.inference.utils import parse_asr_output
 from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
 
+if __package__:
+    from .noise_augmentation import NoiseLibrary, maybe_add_noise
+    from .nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
+    from .processor_collate import build_processor_batch_inputs
+else:
+    from noise_augmentation import NoiseLibrary, maybe_add_noise
+    from nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
+    from processor_collate import build_processor_batch_inputs
+
 _ASR_TEXT_TAG = "<asr_text>"
+_WER_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_english(text: str) -> str:
+    value = (text or "").lower()
+    value = value.translate(str.maketrans("", "", string.punctuation))
+    return _WER_WS_RE.sub(" ", value).strip()
 
 
 def freeze_audio_tower(model) -> None:
@@ -170,9 +187,10 @@ class AudioAugmentConfig:
     specaug_freq_mask_param: int = 27
     specaug_num_time_masks: int = 2
     specaug_num_freq_masks: int = 2
+    nospeech: NoSpeechAugmentConfig = field(default_factory=NoSpeechAugmentConfig)
 
     _specaug_masks: Any = field(default=None, repr=False, compare=False)
-    _noise_files: Any = field(default=None, repr=False, compare=False)
+    noise_library: Optional[NoiseLibrary] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if not self.enabled:
@@ -185,17 +203,7 @@ class AudioAugmentConfig:
                 "pip install --no-deps 'torchaudio==2.8.0+cu128' "
                 "--index-url https://download.pytorch.org/whl/cu128"
             ) from e
-        if self.noise_dir:
-            import glob
-
-            noise_files = glob.glob(
-                os.path.join(self.noise_dir, "**", "*.wav"), recursive=True
-            )
-            if not noise_files:
-                raise FileNotFoundError(
-                    f"No .wav noise files found under {self.noise_dir!r}"
-                )
-            self._noise_files = noise_files
+        self.noise_library = NoiseLibrary.from_dir(self.noise_dir)
         self._specaug_masks = _build_specaug_transforms(self)
 
     @classmethod
@@ -218,6 +226,7 @@ class AudioAugmentConfig:
             specaug_freq_mask_param=int(getattr(args, "specaug_freq_mask_param", 27)),
             specaug_num_time_masks=int(getattr(args, "specaug_num_time_masks", 2)),
             specaug_num_freq_masks=int(getattr(args, "specaug_num_freq_masks", 2)),
+            nospeech=NoSpeechAugmentConfig.from_args(args),
         )
 
 
@@ -249,36 +258,6 @@ def apply_speed_perturbation(wav: np.ndarray, sr: int, factor: float) -> np.ndar
     return out.astype(np.float32, copy=False)
 
 
-def apply_add_noise(
-    wav: np.ndarray, snr_db: float, noise_wav: Optional[np.ndarray] = None
-) -> np.ndarray:
-    """Mix noise at the given SNR (dB).
-
-    If ``noise_wav`` is provided (real background noise), it is tiled/truncated
-    to the signal length; otherwise synthetic white noise is used.
-    """
-    signal = torch.from_numpy(wav).float()
-    if noise_wav is not None:
-        noise = torch.from_numpy(np.asarray(noise_wav, dtype=np.float32)).float()
-        if noise.numel() == 0:
-            noise = torch.randn_like(signal)
-        elif noise.numel() < signal.numel():
-            reps = (signal.numel() + noise.numel() - 1) // noise.numel()
-            noise = noise.repeat(reps)
-        noise = noise[: signal.numel()]
-    else:
-        noise = torch.randn_like(signal)
-    signal_power = signal.pow(2).mean().clamp(min=1e-10)
-    noise_power = noise.pow(2).mean().clamp(min=1e-10)
-    snr_linear = 10 ** (snr_db / 10.0)
-    scale = torch.sqrt(signal_power / (noise_power * snr_linear))
-    mixed = signal + noise * scale
-    peak = mixed.abs().max()
-    if peak > 1.0:
-        mixed = mixed / peak
-    return mixed.numpy().astype(np.float32)
-
-
 def augment_waveform(
     wav: np.ndarray, sr: int, cfg: AudioAugmentConfig, rng: random.Random
 ) -> np.ndarray:
@@ -291,17 +270,15 @@ def augment_waveform(
         else:
             factor = rng.choice(cfg.speed_factors)
         out = apply_speed_perturbation(out, sr, factor)
-    if rng.random() < cfg.noise_prob:
-        lo, hi = cfg.noise_snr_min, cfg.noise_snr_max
-        snr = rng.uniform(min(lo, hi), max(lo, hi))
-        noise_wav = None
-        if cfg._noise_files:
-            nf = rng.choice(cfg._noise_files)
-            try:
-                noise_wav, _ = librosa.load(nf, sr=sr, mono=True)
-            except Exception:
-                noise_wav = None
-        out = apply_add_noise(out, snr, noise_wav=noise_wav)
+    out = maybe_add_noise(
+        out,
+        sr,
+        rng,
+        prob=cfg.noise_prob,
+        snr_min=cfg.noise_snr_min,
+        snr_max=cfg.noise_snr_max,
+        library=cfg.noise_library,
+    )
     return out
 
 
@@ -345,33 +322,36 @@ class DataCollatorForQwen3ASRFinetuning:
         else:
             targets = [f["target"] for f in features]
 
-        eos = self.processor.tokenizer.eos_token or ""
-        full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
-
         cfg = self.augment
         use_aug = cfg is not None and cfg.enabled
         rng = random.Random() if use_aug else None
 
-        audios = []
-        for p, feat in zip(audio_paths, features):
-            wav = load_audio(p, sr=self.sampling_rate)
-            if use_aug and int(feat.get("aug", 1)) == 1:
-                wav = augment_waveform(wav, self.sampling_rate, cfg, rng)
-            audios.append(wav)
+        audios = [load_audio(p, sr=self.sampling_rate) for p in audio_paths]
+        aug_flags = [int(f.get("aug", 1)) for f in features]
 
-        full_inputs = self.processor(
-            text=full_texts,
-            audio=audios,
-            return_tensors="pt",
-            padding=True,
-            truncation=False,
-        )
-        prefix_inputs = self.processor(
-            text=prefix_texts,
-            audio=audios,
-            return_tensors="pt",
-            padding=True,
-            truncation=False,
+        if use_aug and cfg.nospeech.enabled:
+            audios, targets = apply_nospeech_augment(
+                audios,
+                targets,
+                aug_flags,
+                rng,
+                cfg.nospeech,
+                self.sampling_rate,
+            )
+
+        eos = self.processor.tokenizer.eos_token or ""
+        full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
+
+        if use_aug:
+            audios = [
+                augment_waveform(wav, self.sampling_rate, cfg, rng)
+                if aug == 1
+                else wav
+                for wav, aug in zip(audios, aug_flags)
+            ]
+
+        full_inputs, prefix_inputs = build_processor_batch_inputs(
+            self.processor, full_texts, prefix_texts, audios
         )
 
         if use_aug and "input_features" in full_inputs:
@@ -397,10 +377,21 @@ class DataCollatorForQwen3ASRFinetuning:
 
 
 class CastFloatInputsTrainer(Trainer):
-    """Trainer that casts inputs to model dtype and supports a separate eval collator."""
+    """Trainer with a separate eval collator and optional module learning rates."""
 
-    def __init__(self, *args, eval_data_collator=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        eval_data_collator=None,
+        lr_encoder=None,
+        lr_aligner=None,
+        lr_llm=None,
+        **kwargs,
+    ):
         self.eval_data_collator = eval_data_collator
+        self.lr_encoder = lr_encoder
+        self.lr_aligner = lr_aligner
+        self.lr_llm = lr_llm
         super().__init__(*args, **kwargs)
 
     def _prepare_inputs(self, inputs):
@@ -421,6 +412,60 @@ class CastFloatInputsTrainer(Trainer):
             return super().get_eval_dataloader(eval_dataset)
         finally:
             self.data_collator = original
+
+    @staticmethod
+    def _lr_group(name: str) -> str:
+        if any(
+            marker in name
+            for marker in (
+                "audio_tower.conv_out",
+                "audio_tower.proj1",
+                "audio_tower.proj2",
+            )
+        ):
+            return "aligner"
+        if "audio_tower" in name:
+            return "encoder"
+        if "thinker.model." in name or "thinker.lm_head" in name:
+            return "llm"
+        return "other"
+
+    def create_optimizer(self):
+        if self.optimizer is not None:
+            return self.optimizer
+        if self.lr_encoder is None and self.lr_aligner is None and self.lr_llm is None:
+            return super().create_optimizer()
+
+        groups: Dict[str, list] = {"encoder": [], "aligner": [], "llm": [], "other": []}
+        for name, parameter in self.model.named_parameters():
+            if parameter.requires_grad:
+                groups[self._lr_group(name)].append(parameter)
+
+        base_lr = self.args.learning_rate
+        lrs = {
+            "encoder": self.lr_encoder if self.lr_encoder is not None else base_lr,
+            "aligner": self.lr_aligner if self.lr_aligner is not None else base_lr,
+            "llm": self.lr_llm if self.lr_llm is not None else base_lr,
+            "other": base_lr,
+        }
+        optimizer_groups = [
+            {"params": parameters, "lr": lrs[group], "weight_decay": self.args.weight_decay}
+            for group, parameters in groups.items()
+            if parameters
+        ]
+        if self.args.process_index == 0:
+            for group, parameters in groups.items():
+                if parameters:
+                    print(
+                        "[optimizer] %-7s: %d params  lr=%.1e"
+                        % (group, sum(p.numel() for p in parameters), lrs[group])
+                    )
+        self.optimizer = torch.optim.AdamW(
+            optimizer_groups,
+            betas=(self.args.adam_beta1, self.args.adam_beta2),
+            eps=self.args.adam_epsilon,
+        )
+        return self.optimizer
 
 
 def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
@@ -562,28 +607,33 @@ def _wer_extract_ref(label: str) -> str:
 
 
 def _wer_lang_from_label(label: str) -> str:
-    """Map the language atom in the data label to a masr normalizer code."""
+    """Map the language atom in a data label to the scoring language."""
     head = label.split(_ASR_TEXT_TAG, 1)[0].lower() if _ASR_TEXT_TAG in (label or "") else ""
+    if "english" in head:
+        return "en"
     if "chinese" in head:
         return "zh"
-    return "ug"  # default to Uyghur for Uyghur / unknown
+    return "ug"
 
 
 class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
-    """Keep the N checkpoints with the lowest dev WER (macro CER over Uyghur + Mandarin).
-
-    On each Trainer eval it runs ``asr_wrapper.transcribe`` (no language hint) on a
-    capped, fixed-seed dev subset, computes per-language CER via masr, macro-averages
-    them, and ranks checkpoints by that score (lower is better). Optionally applies a
-    deterministic per-utterance speed perturbation to the dev audio so selection is on a
-    robust dev set.
-    """
+    """Keep checkpoints ranked by generation WER on a fixed validation subset."""
 
     ranking_filename = "best_wer_checkpoints.json"
 
-    def __init__(self, limit, asr_wrapper, eval_dataset, sr=16000,
-                 wer_eval_samples=400, wer_batch_size=4,
-                 eval_speed_aug=False, speed_min=0.8, speed_max=1.6, seed=1234):
+    def __init__(
+        self,
+        limit,
+        asr_wrapper,
+        eval_dataset,
+        sr=16000,
+        wer_eval_samples=400,
+        wer_batch_size=4,
+        eval_speed_aug=False,
+        speed_min=0.8,
+        speed_max=1.6,
+        seed=1234,
+    ):
         super().__init__(limit)
         self.asr_wrapper = asr_wrapper
         self.eval_dataset = eval_dataset
@@ -594,20 +644,57 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         self.speed_min = speed_min
         self.speed_max = speed_max
         self.seed = seed
-        self._subset = None  # cached list of (audio_path, ref_text, lang_code)
+        self._subset = None
+
+    def _load_ranking(self, output_dir: str) -> None:
+        path = self._ranking_path(output_dir)
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            for item in data.get("checkpoints", []):
+                value = item.get("wer", item.get("eval_loss"))
+                if value is not None:
+                    self.eval_losses[int(item["step"])] = float(value)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            print(f"[best-wer] ignoring unreadable ranking file {path}: {exc}")
+
+    def _write_ranking(self, output_dir: str, ranked: List[Tuple[float, int, str]]) -> None:
+        path = self._ranking_path(output_dir)
+        tmp_path = path + ".tmp"
+        payload = {
+            "metric": "wer",
+            "greater_is_better": False,
+            "limit": self.limit,
+            "checkpoints": [
+                {
+                    "rank": rank,
+                    "step": step,
+                    "wer": value,
+                    "path": os.path.abspath(ckpt_dir),
+                }
+                for rank, (value, step, ckpt_dir) in enumerate(ranked, start=1)
+            ],
+        }
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, path)
 
     def _build_subset(self):
         if self._subset is not None:
             return self._subset
-        ds = self.eval_dataset
-        n = len(ds)
-        idxs = list(range(n))
-        random.Random(self.seed).shuffle(idxs)
-        if self.wer_eval_samples and 0 < self.wer_eval_samples < n:
-            idxs = idxs[: self.wer_eval_samples]
-        rows = ds.select(idxs)
-        self._subset = [(r["audio"], _wer_extract_ref(r["target"]), _wer_lang_from_label(r["target"]))
-                        for r in rows]
+        dataset = self.eval_dataset
+        indices = list(range(len(dataset)))
+        if self.wer_eval_samples and 0 < self.wer_eval_samples < len(indices):
+            random.Random(self.seed).shuffle(indices)
+            indices = indices[: self.wer_eval_samples]
+        rows = dataset.select(indices)
+        self._subset = [
+            (row["audio"], _wer_extract_ref(row["target"]), _wer_lang_from_label(row["target"]))
+            for row in rows
+        ]
         return self._subset
 
     def _load_and_augment(self, path):
@@ -615,64 +702,94 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
 
         wav = load_audio(path, sr=self.sr)
         if self.eval_speed_aug:
-            r = random.Random(zlib.crc32(path.encode("utf-8")) & 0xFFFFFFFF)
-            factor = r.uniform(self.speed_min, self.speed_max)
+            seed = zlib.crc32(path.encode("utf-8")) & 0xFFFFFFFF
+            factor = random.Random(seed).uniform(self.speed_min, self.speed_max)
             wav = apply_speed_perturbation(wav, self.sr, factor)
         return wav
 
-    def _compute_macro_cer(self):
-        from masr_eval_pkg import compute_cer
-        from masr_eval_pkg.normalizers import get_normalizer
+    def _compute_wer(self) -> float:
+        from masr_eval_pkg import compute_wer
 
         items = self._build_subset()
-        norms = {"ug": get_normalizer("ug"),
-                 "zh": get_normalizer("zh", zh_convert="t2s")}
-
-        hyps = [None] * len(items)
+        hypotheses = [""] * len(items)
         model = self.asr_wrapper.model
         was_training = model.training
         model.eval()
         try:
             with torch.no_grad():
                 for start in range(0, len(items), self.wer_batch_size):
-                    batch = items[start: start + self.wer_batch_size]
-                    inputs = [(self._load_and_augment(a), self.sr) for a, _, _ in batch]
-                    outs = self.asr_wrapper.transcribe(
-                        audio=inputs, language=None, return_time_stamps=False,
+                    batch = items[start : start + self.wer_batch_size]
+                    inputs = [(self._load_and_augment(audio), self.sr) for audio, _, _ in batch]
+                    outputs = self.asr_wrapper.transcribe(
+                        audio=inputs, language=None, return_time_stamps=False
                     )
-                    for j, o in enumerate(outs):
-                        _, txt = parse_asr_output(o.text, user_language=None)
-                        hyps[start + j] = txt or ""
+                    for offset, output in enumerate(outputs):
+                        _, text = parse_asr_output(output.text, user_language=None)
+                        hypotheses[start + offset] = text or ""
         finally:
             model.train(was_training)
 
-        refs = [ref for _, ref, _ in items]
-        langs = [lang for _, _, lang in items]
-        per_lang = {}
-        for lang in set(langs):
-            r_idx = [i for i, l in enumerate(langs) if l == lang]
-            if not r_idx:
-                continue
-            norm = norms.get(lang) or norms["ug"]
-            r_list = [norm.normalize_for_cer(refs[i]) for i in r_idx]
-            h_list = [norm.normalize_for_cer(hyps[i] or "") for i in r_idx]
-            per_lang[lang] = compute_cer(r_list, h_list)["cer"]
-        if not per_lang:
-            return float("nan")
-        return sum(per_lang.values()) / len(per_lang)
+        references = [_normalize_english(reference) for _, reference, _ in items]
+        hypotheses = [_normalize_english(hypothesis) for hypothesis in hypotheses]
+        return float(compute_wer(references, hypotheses)["wer"])
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if args.process_index != 0 or self.eval_dataset is None:
             return control
-        cer = self._compute_macro_cer()
-        if metrics is not None and math.isfinite(cer):
-            metrics["wer"] = cer
-        if math.isfinite(cer):
-            self.eval_losses[int(state.global_step)] = cer
-        if args.process_index == 0:
-            print("[best-wer] step=%d macro_cer=%.4f" % (state.global_step, cer))
+        wer = self._compute_wer()
+        if metrics is not None and math.isfinite(wer):
+            metrics["wer"] = wer
+        if math.isfinite(wer):
+            self.eval_losses[int(state.global_step)] = wer
+        print("[best-wer] step=%d wer=%.4f" % (state.global_step, wer))
         return control
 
+
+class StopOnMetricPlateauCallback(TrainerCallback):
+    """Stop after repeated evaluations without a meaningful metric improvement."""
+
+    def __init__(self, metric: str, patience: int, threshold: float, ranking_filename: str):
+        if patience < 1:
+            raise ValueError("Early-stopping patience must be positive.")
+        self.metric = metric
+        self.patience = patience
+        self.threshold = threshold
+        self.ranking_filename = ranking_filename
+        self.best_value: Optional[float] = None
+        self.bad_evals = 0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        path = os.path.join(args.output_dir, self.ranking_filename)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            values = [
+                float(item.get(self.metric, item.get("eval_loss")))
+                for item in data.get("checkpoints", [])
+                if item.get(self.metric, item.get("eval_loss")) is not None
+            ]
+            if values:
+                self.best_value = min(values)
+        return control
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if not metrics or metrics.get(self.metric) is None:
+            return control
+        value = float(metrics[self.metric])
+        improved = self.best_value is None or value < self.best_value - self.threshold
+        if improved:
+            self.best_value = value
+            self.bad_evals = 0
+        else:
+            self.bad_evals += 1
+        print(
+            "[early-stop] step=%d %s=%.6f best=%.6f bad_evals=%d/%d"
+            % (state.global_step, self.metric, value, self.best_value, self.bad_evals, self.patience)
+        )
+        if self.bad_evals >= self.patience:
+            control.should_training_stop = True
+            print("[early-stop] convergence criterion reached; stopping training.")
+        return control
 
 
 class KeepAudioTowerFrozenCallback(TrainerCallback):
@@ -731,6 +848,9 @@ def parse_args():
     p.add_argument("--epochs", type=float, default=1)
     p.add_argument("--log_steps", type=int, default=10)
     p.add_argument("--lr_scheduler_type", type=str, default="linear")
+    p.add_argument("--lr_encoder", type=float, default=None)
+    p.add_argument("--lr_aligner", type=float, default=None)
+    p.add_argument("--lr_llm", type=float, default=None)
     p.add_argument("--warmup_ratio", type=float, default=0.02)
     p.add_argument(
         "--freeze_audio_tower",
@@ -783,6 +903,10 @@ def parse_args():
                    help="Capped dev subset size for the WER selection metric (balanced by random subset).")
     p.add_argument("--wer_batch_size", type=int, default=4,
                    help="Inference batch size for the WER selection generation.")
+    p.add_argument("--early_stopping_metric", type=str, default="eval_loss",
+                   choices=("eval_loss", "wer"))
+    p.add_argument("--early_stopping_patience", type=int, default=0)
+    p.add_argument("--early_stopping_threshold", type=float, default=0.0)
     p.add_argument("--eval_speed_aug", type=int, default=0, choices=(0, 1),
                    help="Apply a deterministic per-utterance speed perturbation to dev audio "
                         "used for the WER selection metric (robust dev).")
@@ -817,6 +941,13 @@ def parse_args():
     p.add_argument("--specaug_freq_mask_param", type=int, default=27)
     p.add_argument("--specaug_num_time_masks", type=int, default=2)
     p.add_argument("--specaug_num_freq_masks", type=int, default=2)
+
+    # No-speech segment augmentation (train only; default off)
+    p.add_argument("--nospeech_augment", type=int, default=0, choices=(0, 1))
+    p.add_argument("--nospeech_prob", type=float, default=0.3)
+    p.add_argument("--nospeech_pad_min_sec", type=float, default=0.5)
+    p.add_argument("--nospeech_pad_max_sec", type=float, default=3.0)
+    p.add_argument("--nospeech_dual_max_speech_sec", type=float, default=30.0)
 
     return p.parse_args()
 
@@ -931,6 +1062,22 @@ def main():
             ))
         else:
             callbacks.append(KeepBestCheckpointsCallback(limit=keep_best_limit))
+    if args_cli.early_stopping_patience > 0:
+        if not args_cli.eval_file:
+            raise ValueError("--early_stopping_patience requires --eval_file")
+        ranking_filename = (
+            "best_wer_checkpoints.json"
+            if args_cli.early_stopping_metric == "wer"
+            else "best_checkpoints.json"
+        )
+        callbacks.append(
+            StopOnMetricPlateauCallback(
+                metric=args_cli.early_stopping_metric,
+                patience=args_cli.early_stopping_patience,
+                threshold=args_cli.early_stopping_threshold,
+                ranking_filename=ranking_filename,
+            )
+        )
     if args_cli.freeze_audio_tower == 1:
         callbacks.append(KeepAudioTowerFrozenCallback())
     if args_cli.curriculum:
@@ -945,6 +1092,9 @@ def main():
         eval_data_collator=eval_collator if args_cli.eval_file else None,
         tokenizer=processor.tokenizer,
         callbacks=callbacks,
+        lr_encoder=args_cli.lr_encoder,
+        lr_aligner=args_cli.lr_aligner,
+        lr_llm=args_cli.lr_llm,
     )
 
     if trainer.args.process_index == 0 and augment_cfg.enabled:
@@ -952,6 +1102,17 @@ def main():
             "[augment] enabled: speed_prob=%s noise_prob=%s specaug_prob=%s"
             % (augment_cfg.speed_prob, augment_cfg.noise_prob, augment_cfg.specaug_prob)
         )
+        if augment_cfg.noise_library is not None and augment_cfg.noise_library.enabled:
+            print(
+                "[augment] noise_dir=%s files=%d"
+                % (augment_cfg.noise_dir, augment_cfg.noise_library.num_files)
+            )
+        if augment_cfg.nospeech.enabled:
+            ns = augment_cfg.nospeech
+            print(
+                "[augment] nospeech_prob=%s pad=%.1f-%.1fs dual_max=%.1fs"
+                % (ns.prob, ns.pad_min_sec, ns.pad_max_sec, ns.dual_max_speech_sec)
+            )
 
     resume_from = (args_cli.resume_from or "").strip()
     if not resume_from and args_cli.resume == 1:

@@ -6,9 +6,9 @@ import unittest
 import numpy as np
 import torch
 
+from finetuning.noise_augmentation import apply_add_noise
 from finetuning.qwen3_asr_sft import (
     AudioAugmentConfig,
-    apply_add_noise,
     apply_specaugment,
     apply_speed_perturbation,
     augment_waveform,
