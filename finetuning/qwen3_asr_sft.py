@@ -132,11 +132,17 @@ def build_prefix_messages(prompt: str, audio_array):
 
 
 _LANG_PREFIX_RE = re.compile(r"language [^<]*<asr_text>")
+_TARGET_BRACKETS_RE = re.compile(r"[()\[\]{}]")
 
 
 def _swap_language_to_none(text: str) -> str:
     """Derive the 'language None<asr_text>...' variant from an explicit label."""
     return _LANG_PREFIX_RE.sub("language None<asr_text>", text or "", count=1)
+
+
+def strip_target_brackets(text: str) -> str:
+    """Remove ASCII bracket glyphs while preserving their contents and ASR tag."""
+    return _TARGET_BRACKETS_RE.sub("", text or "")
 
 
 def make_preprocess_fn_prefix_only(processor, curriculum: bool = False):
@@ -312,6 +318,7 @@ class DataCollatorForQwen3ASRFinetuning:
     curriculum: bool = False
     curriculum_switch_epoch: float = 1.0
     current_epoch: float = 0.0
+    strip_target_brackets: bool = False
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         audio_paths = [f["audio"] for f in features]
@@ -338,6 +345,8 @@ class DataCollatorForQwen3ASRFinetuning:
                 cfg.nospeech,
                 self.sampling_rate,
             )
+        if self.strip_target_brackets:
+            targets = [strip_target_brackets(target) for target in targets]
 
         eos = self.processor.tokenizer.eos_token or ""
         full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
@@ -874,6 +883,13 @@ def parse_args():
         default=1.0,
         help="Epoch (0-indexed) at which the collator switches targets to the None variant.",
     )
+    p.add_argument(
+        "--strip_target_brackets",
+        type=int,
+        default=0,
+        choices=(0, 1),
+        help="Remove ()[]{} from SFT targets while preserving their contents.",
+    )
 
     # DataLoader
     p.add_argument("--num_workers", type=int, default=4)
@@ -1006,11 +1022,13 @@ def main():
         augment=augment_cfg if augment_cfg.enabled else None,
         curriculum=bool(args_cli.curriculum),
         curriculum_switch_epoch=args_cli.curriculum_switch_epoch,
+        strip_target_brackets=bool(args_cli.strip_target_brackets),
     )
     eval_collator = DataCollatorForQwen3ASRFinetuning(
         processor=processor,
         sampling_rate=args_cli.sr,
         augment=None,
+        strip_target_brackets=bool(args_cli.strip_target_brackets),
     )
 
     keep_best_limit = args_cli.save_best_total_limit if args_cli.eval_file else 0

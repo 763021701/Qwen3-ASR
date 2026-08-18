@@ -377,7 +377,7 @@ def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
 
 def stage_validate(config: Dict[str, Any], dry_run: bool) -> None:
     dataset = config.get("dataset", {})
-    language = str(dataset.get("language") or "").strip()
+    language = str(dataset.get("validation_language", dataset.get("language")) or "").strip()
     check_audio = bool(int(dataset.get("check_audio") or 1))
     paths = manifest_paths(config)
     out_dir = abspath(str(config.get("training", {}).get("output_dir", "outputs/qwen3_asr_pipeline")))
@@ -430,6 +430,7 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "lr": "--lr",
         "epochs": "--epochs",
         "freeze_audio_tower": "--freeze_audio_tower",
+        "strip_target_brackets": "--strip_target_brackets",
         "save_steps": "--save_steps",
         "save_total_limit": "--save_total_limit",
         "save_best_total_limit": "--save_best_total_limit",

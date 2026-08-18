@@ -23,6 +23,7 @@ dataset:
   dev_jsonl: data/example/dev.jsonl
 training:
   output_dir: outputs/example
+  strip_target_brackets: 1
   augment: 1
   speed_factors: "0.9,1.1"
   noise_prob: 0.3
@@ -40,6 +41,9 @@ runtime:
             self.assertIn("--noise_dir", cmd)
             idx = cmd.index("--noise_dir")
             self.assertEqual(cmd[idx + 1], "data/noise_from_seg")
+            self.assertIn("--strip_target_brackets", cmd)
+            idx = cmd.index("--strip_target_brackets")
+            self.assertEqual(cmd[idx + 1], "1")
 
 
 if __name__ == "__main__":
