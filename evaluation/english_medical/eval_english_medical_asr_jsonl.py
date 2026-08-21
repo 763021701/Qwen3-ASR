@@ -21,8 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
-import string
 import sys
 import time
 from typing import Any, Dict, List, Set
@@ -36,9 +34,9 @@ if _REPO_ROOT not in sys.path:
 from qwen_asr import Qwen3ASRModel
 from qwen_asr.inference.utils import parse_asr_output
 from masr_eval_pkg import compute_wer
+from evaluation.english_medical.text_normalization import normalize_english
 
 _ASR_TEXT_TAG = "<asr_text>"
-_WS_RE = re.compile(r"\s+")
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,14 +75,6 @@ def extract_reference_text(label: str) -> str:
         return ""
     if _ASR_TEXT_TAG in s:
         return s.split(_ASR_TEXT_TAG, 1)[1].strip()
-    return s
-
-
-def normalize_english(text: str) -> str:
-    """Standard English ASR normalization: lowercase, strip punctuation, collapse whitespace."""
-    s = (text or "").lower()
-    s = s.translate(str.maketrans("", "", string.punctuation))
-    s = _WS_RE.sub(" ", s).strip()
     return s
 
 
@@ -215,11 +205,15 @@ def main() -> None:
                 raw_out = getattr(o, "text", "") or ""
                 _, hyp_text = parse_asr_output(raw_out, user_language=lang)
                 hyp_lang, _ = parse_asr_output(raw_out, user_language=None) if raw_out else ("", "")
+                ref_text_normalized = normalize_english(ref_text)
+                hyp_text_normalized = normalize_english(hyp_text)
                 rec = {
                     "audio": ex["audio"],
                     "index": ex.get("index", idx),
                     "reference": ref_text,
+                    "reference_normalized": ref_text_normalized,
                     "hypothesis": hyp_text,
+                    "hypothesis_normalized": hyp_text_normalized,
                     "detected_language": hyp_lang if raw_out else "",
                     "keywords": ex.get("keywords", ""),
                 }
@@ -255,22 +249,36 @@ def main() -> None:
 
     # Align by audio path (in case order differs)
     ref_by_audio = {ex["audio"]: extract_reference_text(ex["text"]) for ex in rows}
-    refs = []
-    hyps = []
+    refs_norm = []
+    hyps_norm = []
     missing = 0
+    predictions_changed = False
     for p in preds:
         ref = ref_by_audio.get(p["audio"])
         if ref is None:
             missing += 1
             continue
-        refs.append(ref)
-        hyps.append(p["hypothesis"])
+        ref_normalized = normalize_english(ref)
+        hyp_normalized = normalize_english(p["hypothesis"])
+        updated_fields = {
+            "reference": ref,
+            "reference_normalized": ref_normalized,
+            "hypothesis_normalized": hyp_normalized,
+        }
+        if any(p.get(key) != value for key, value in updated_fields.items()):
+            p.update(updated_fields)
+            predictions_changed = True
+        refs_norm.append(ref_normalized)
+        hyps_norm.append(hyp_normalized)
 
     if missing:
         print(f"Warning: {missing} predictions had no matching reference.", file=sys.stderr)
 
-    refs_norm = [normalize_english(r) for r in refs]
-    hyps_norm = [normalize_english(h) for h in hyps]
+    if predictions_changed:
+        with open(args.output_predictions, "w", encoding="utf-8") as f:
+            for p in preds:
+                f.write(json.dumps(p, ensure_ascii=False) + "\n")
+        print(f"Updated normalized fields in {args.output_predictions}")
 
     wer_result = compute_wer(refs_norm, hyps_norm, per_sample=True)
     per_sample = wer_result.get("per_sample", [])
@@ -286,7 +294,9 @@ def main() -> None:
         f"Language prompting:  {lang!r}",
         f"Batch size:          {args.batch_size}",
         f"Max new tokens:      {args.max_new_tokens}",
-        f"Normalization:       lowercase + strip punctuation + collapse whitespace",
+        "Normalization:       NFKC + Chinese/English numerals to Arabic + preserve decimal points + "
+        "x/乘 -> x + merge spaced letters + split alphanumeric boundaries + preserve parenthesized content + gram variants + paraffine -> paraffin + "
+        "remove numeric 個 classifier + close dictionary-listed hyphenated compounds + map other dashes to spaces + lowercase + strip other ASCII punctuation + collapse whitespace",
         f"Corpus WER:          {wer_result['wer'] * 100:.2f}%",
         f"Substitutions:       {wer_result['substitutions']}",
         f"Deletions:           {wer_result['deletions']}",
