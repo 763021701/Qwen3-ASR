@@ -43,6 +43,7 @@ Supported `dataset.source_type` values in v1:
 - `common_voice`: uses TSV files and `clips_dir`.
 - `kaldi`: uses `wav.scp` plus matching text files.
 - `funasr_jsonl`: uses FunASR-style message JSONL.
+ `pathology_en_jsonl`: uses the high-quality pathology manifest and splits by `video_id`.
 
 The prepared manifests are:
 
@@ -79,6 +80,9 @@ Validation checks JSON syntax, required fields, audio existence, label format
 (`language {Name[,Name...]}<asr_text>{transcript}`), and that every language
 token in the label is listed in `SUPPORTED_LANGUAGES` inside `qwen_asr/inference/utils.py`
 (comma-separated specs are supported; `None` is only allowed alone, e.g. `language None<asr_text>...`).
+
+For nospeech labels vs inference `language` (common SFT hallucination pitfall), see
+[`language_labels_and_inference.md`](language_labels_and_inference.md).
 
 ## Utility Scripts
 

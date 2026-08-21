@@ -60,6 +60,23 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Autonomous Long-Running Tasks
+
+When executing a task:
+
+- Work autonomously until the requested objective is fully completed.
+- Do not ask the user clarification questions during execution.
+- If there is ambiguity, inspect the repository, documentation, tests, and existing conventions first.
+- If ambiguity remains, choose the most reasonable reversible assumption and continue.
+- Do not stop merely to report intermediate progress.
+- Do not stop after identifying a problem if it can reasonably be fixed.
+- When an implementation attempt fails, diagnose the failure and try another reasonable approach.
+- Continue fixing issues discovered by tests, linting, type checking, builds, or runtime verification.
+- Run all relevant verification before declaring completion.
+- Prefer executable verification over assumptions based only on code inspection.
+- Do not declare the goal complete while known relevant failures remain.
+- Only stop when the objective and success criteria are satisfied, or when a genuine external blocker makes further progress impossible.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

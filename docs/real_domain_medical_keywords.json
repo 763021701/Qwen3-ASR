@@ -1,0 +1,4321 @@
+{
+  "meta": {
+    "purpose": "Keyword and phrase inventory from real HK pathology dictation for TTS/synthesis coverage.",
+    "train_manifest": "data/poc_train_real_raw_denoised/train.jsonl",
+    "dev_manifest": "data/poc_train_real_raw_denoised/dev.jsonl",
+    "test_manifest": "raw/POC_test/metadata.jsonl",
+    "n_unique_texts": {
+      "train": 898,
+      "dev": 288,
+      "test": 53
+    },
+    "train_groups": [
+      "13229",
+      "13247",
+      "13290",
+      "13373",
+      "13488",
+      "Sample1",
+      "Sample10",
+      "Sample2",
+      "Sample3",
+      "Sample4",
+      "Sample5",
+      "Sample6",
+      "Sample7",
+      "Sample8",
+      "Sample9"
+    ],
+    "dev_groups": [
+      "13297",
+      "13342"
+    ],
+    "test_groups": [
+      "12009",
+      "12712",
+      "26SS11678",
+      "26SS11731",
+      "26SS12082",
+      "26SS12099"
+    ],
+    "priority_legend": {
+      "test_only": "Appears in held-out test but not current SFT train unique texts. Highest synthesis value.",
+      "dev_only": "Appears in real dev groups (13297/13342) but not train. Useful if you want thyroid/staple-line coverage.",
+      "train_and_test": "Already in train, still needed so synthesis matches test phrasing.",
+      "train_only": "Present in train; still useful to increase acoustic diversity."
+    },
+    "notes": [
+      "Counts are unique-utterance hits after dropping raw/denoised duplicates.",
+      "Dev is listed because thyroidectomy and staple line live there, not in train.",
+      "Do not copy test transcripts verbatim into synthesis prompts.",
+      "For alphanumeric IDs, synthesize the PATTERN (e.g. 26SS#####, 12###) rather than the test IDs themselves."
+    ]
+  },
+  "dictation_templates": [
+    "Specimen labelled {laterality} {specimen_name}.",
+    "Specimen labelled {specimen_name} is received in formalin, it consists of ...",
+    "Submitted fresh was a {procedure} specimen weighing {n} gram.",
+    "Submitted fresh were three lymph nodes labelled SN 1, SN 2 and non-SN.",
+    "Received specimen labelled {laterality} {specimen_name}. It consists of ...",
+    "It consists of a {descriptor} piece of {tissue} measuring {a} × {b} × {c} mm in size.",
+    "The {structure} measures {a} mm in length and {b} mm in diameter, period.",
+    "It measured {a} cm across, {b} cm longitudinally and {c} cm anteroposteriorly.",
+    "The {surface} was {descriptor} and was inked {color}.",
+    "{laterality} and {laterality} sides were inked {color1} and {color2} respectively.",
+    "Superficial and deep halves were inked blue and black respectively. Superior edge was inked yellow.",
+    "Sectioning shows a {location} {descriptor} nodule measuring {a} cm × {b} mm × {c} mm.",
+    "Scrape cytology smear and block ({letter}) sampled for frozen and paraffin sections.",
+    "The rest of the nodule was all embedded in block ({letter}) for paraffin section. Total {n} blocks.",
+    "{n} paraffin blocks were subsequently taken as follows: ({letters}) All embedding the rest of the nodule. ({letter}) Background thyroid. Total {n} 個 blocks.",
+    "SN {n} measured {a} cm × {b} cm × {c} mm and was bisected and all embedded in block ({letter}) for frozen and paraffin sections.",
+    "Non-SN measured {a} mm × {b} mm × {c} mm and was bisected and all embedded in block ({letter}) for frozen and paraffin sections.",
+    "Serially sectioned. All embedded in {n} blocks.",
+    "Bisected. All embedded in {n} frozen blocks. Block {letter} Frozen block. Block {letter} Rest of tissue.",
+    "All fibroids show pink firm tissue on cut surfaces, period. No necrosis or haemorrhage can be identified, period.",
+    "The adjacent myometrium is grossly unremarkable, period.",
+    "Sections show {tissue} with mild chronic inflammation. No dysplasia or malignancy is seen. No helicobacter seen, full stop.",
+    "{a} mm × {b} mm × {c} mm in size.",
+    "{a} c m 乘 {b} c m 乘 {c} c m",
+    "The specimen weighs {n} gram, period."
+  ],
+  "categories": [
+    {
+      "id": "dictation_frames",
+      "title": "口述框架 / 开场收尾",
+      "note": "",
+      "items": [
+        {
+          "phrase": "specimen labelled",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 116,
+          "n_dev": 22,
+          "n_test": 7
+        },
+        {
+          "phrase": "specimen labeled",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "it consists of",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 41,
+          "n_dev": 35,
+          "n_test": 2
+        },
+        {
+          "phrase": "consists of",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 80,
+          "n_dev": 41,
+          "n_test": 3
+        },
+        {
+          "phrase": "submitted was",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 23,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "submitted were",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 14,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "submitted fresh",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 4
+        },
+        {
+          "phrase": "received fresh",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 8,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "is received in formalin",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 22,
+          "n_dev": 40,
+          "n_test": 0
+        },
+        {
+          "phrase": "received in formalin",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 24,
+          "n_dev": 40,
+          "n_test": 0
+        },
+        {
+          "phrase": "in aggregate",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 30,
+          "n_dev": 9,
+          "n_test": 0
+        },
+        {
+          "phrase": "in greatest dimension",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 19,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "in size",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 18,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "weighing",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 14,
+          "n_dev": 10,
+          "n_test": 1
+        },
+        {
+          "phrase": "the specimen weighs",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "summary of sections",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "end of dictation",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "thank you",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "taken as follows",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "representative blocks taken",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 11,
+          "n_dev": 7,
+          "n_test": 0
+        },
+        {
+          "phrase": "as follows",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 14,
+          "n_dev": 0,
+          "n_test": 2
+        }
+      ]
+    },
+    {
+      "id": "spoken_punctuation",
+      "title": "口头标点与切分词",
+      "note": "",
+      "items": [
+        {
+          "phrase": "period",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 39,
+          "n_dev": 0,
+          "n_test": 10
+        },
+        {
+          "phrase": "full stop",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 95,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "comma",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 34,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "dash",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 21,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "o'clock",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 17,
+          "n_dev": 22,
+          "n_test": 0
+        }
+      ]
+    },
+    {
+      "id": "grossing_actions",
+      "title": "取材 / 包埋 / 切片动作",
+      "note": "",
+      "items": [
+        {
+          "phrase": "all embedded",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 77,
+          "n_dev": 32,
+          "n_test": 8
+        },
+        {
+          "phrase": "all embedded in",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 60,
+          "n_dev": 32,
+          "n_test": 8
+        },
+        {
+          "phrase": "embedded in block",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 17,
+          "n_dev": 4,
+          "n_test": 7
+        },
+        {
+          "phrase": "embedded in blocks",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 10,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "entirely submitted",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "submitted in toto",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "bisected",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 8,
+          "n_dev": 2,
+          "n_test": 4
+        },
+        {
+          "phrase": "serially sectioned",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 11,
+          "n_dev": 5,
+          "n_test": 3
+        },
+        {
+          "phrase": "serial sectioning",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "sectioned",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 12,
+          "n_dev": 5,
+          "n_test": 3
+        },
+        {
+          "phrase": "section shows",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 12,
+          "n_dev": 6,
+          "n_test": 1
+        },
+        {
+          "phrase": "sectioning shows",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "cut section shows",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 12,
+          "n_dev": 6,
+          "n_test": 0
+        },
+        {
+          "phrase": "cut surfaces",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 16,
+          "n_dev": 4,
+          "n_test": 2
+        },
+        {
+          "phrase": "frozen block",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 22,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "frozen section",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "paraffin section",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 10
+        },
+        {
+          "phrase": "paraffin sections",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 9
+        },
+        {
+          "phrase": "frozen and paraffin sections",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 9
+        },
+        {
+          "phrase": "scrape cytology",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "cytology smear",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "sampled for frozen and paraffin sections",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "representative sampling",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "additional block",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 7,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "rest of tissue",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "rest of the nodule",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "background thyroid",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        }
+      ]
+    },
+    {
+      "id": "orientation_marking",
+      "title": "定向、染色、缝线、缝钉",
+      "note": "",
+      "items": [
+        {
+          "phrase": "inked",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 14,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "inked black",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 10,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "inked blue",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "inked yellow",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "inked black and blue",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "painted",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 5,
+          "n_dev": 11,
+          "n_test": 0
+        },
+        {
+          "phrase": "orientation",
+          "priority": "test_only",
+          "splits": [
+            "dev",
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 6,
+          "n_test": 1
+        },
+        {
+          "phrase": "stitches indicating orientation",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "stitch",
+          "priority": "dev_only",
+          "splits": [
+            "dev"
+          ],
+          "n_train": 0,
+          "n_dev": 6,
+          "n_test": 0
+        },
+        {
+          "phrase": "stitches",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 4,
+          "n_test": 1
+        },
+        {
+          "phrase": "suture",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "staple",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 4,
+          "n_dev": 9,
+          "n_test": 0
+        },
+        {
+          "phrase": "staples",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "surgical staples",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "staple line",
+          "priority": "dev_only",
+          "splits": [
+            "dev"
+          ],
+          "n_train": 0,
+          "n_dev": 8,
+          "n_test": 0
+        },
+        {
+          "phrase": "wire",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "all margins perpendicular",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "superficial and deep halves",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "superior edge",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "medial side",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "inner and outer sides",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        }
+      ]
+    },
+    {
+      "id": "procedures_specimen_types",
+      "title": "术式 / 标本类型",
+      "note": "",
+      "items": [
+        {
+          "phrase": "hysterectomy",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 3,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "hysterectomy specimen",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "hemithyroidectomy",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "hemithyroidectomy specimen",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "thyroidectomy",
+          "priority": "dev_only",
+          "splits": [
+            "dev"
+          ],
+          "n_train": 0,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "total thyroidectomy",
+          "priority": "dev_only",
+          "splits": [
+            "dev"
+          ],
+          "n_train": 0,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "hemithyroid",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "left hemithyroid",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "lumpectomy",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "left lumpectomy",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "lumpectomy specimen",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "mastectomy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "mastectomy specimen",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "hemicolectomy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left hemicolectomy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "salpingo-oophorectomy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 1,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "oophorectomy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 1,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "wedge resection",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 3,
+          "n_dev": 5,
+          "n_test": 0
+        },
+        {
+          "phrase": "left upper lobe wedge resection",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 1,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "leep cone biopsy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "cone biopsy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "uterine curettings",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "uterine curettage",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "endometrial polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 15,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "endometrial polyps",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "cervical polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "sentinel node",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "left sentinel node",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "sentinel lymph node",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        }
+      ]
+    },
+    {
+      "id": "specimen_labels",
+      "title": "specimen labelled 后的具体名称（合成时优先整短语）",
+      "note": "",
+      "items": [
+        {
+          "phrase": "gallbladder",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 19,
+          "n_dev": 4,
+          "n_test": 0
+        },
+        {
+          "phrase": "uterus",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 25,
+          "n_dev": 11,
+          "n_test": 4
+        },
+        {
+          "phrase": "uterus and bilateral tubes and ovaries",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "uterus and bilateral appendages",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "uterus and its appendages",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "uterus and fibroid",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "uterine fibroids",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "left ovarian cyst",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 8,
+          "n_dev": 1,
+          "n_test": 0
+        },
+        {
+          "phrase": "left kidney",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left breast",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 8,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left breast received in formalin consists of a mastectomy specimen",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "right lateral breast mass",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left oral cavity mass",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left maxillary sinus mass",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left lower lobe apical segment",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left lower lobe lung nodule",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "left upper lobe",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 3,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "left upper lobe wedge bulla",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 1,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "gastric submucosal tumour",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "sigmoid colon",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "sigmoid colon polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "ascending colon polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "leep cone biopsy of cervix",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "liver cyst wall",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "cervical polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "endometrial polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 15,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "endometrial polyps",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "haemorrhoids",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "vallecular cyst",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "epidural abscess soft tissue",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "abdominal peritonaeal biopsy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "peritonaeal biopsy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "interlobar lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 1,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "hilar lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left paratracheal lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left pelvic lymph nodes",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "left para-aortic lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "pulmonary ligament lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "right ear mast",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "left hemithyroid",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "left lumpectomy",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "left sentinel node",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        }
+      ]
+    },
+    {
+      "id": "lymph_nodes_and_ids",
+      "title": "淋巴结与缩写（测试集高优先级）",
+      "note": "",
+      "items": [
+        {
+          "phrase": "lymph node",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 26,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "lymph nodes",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 8,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "sentinel node",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "sentinel lymph node",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "axillary lymph node",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "right axillary",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "pelvic lymph nodes",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "para-aortic lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "paratracheal lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "hilar lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "interlobar lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 1,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "pulmonary ligament lymph node",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "SN 1",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "SN 2",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "SN1",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "SN2",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "non-SN",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 4
+        },
+        {
+          "phrase": "non-sn",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 4
+        },
+        {
+          "phrase": "S L N",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "SLN",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "level I",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "level 1",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        }
+      ]
+    },
+    {
+      "id": "anatomy",
+      "title": "解剖部位",
+      "note": "",
+      "items": [
+        {
+          "phrase": "uterus",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 25,
+          "n_dev": 11,
+          "n_test": 4
+        },
+        {
+          "phrase": "uterine",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 26,
+          "n_dev": 6,
+          "n_test": 2
+        },
+        {
+          "phrase": "cervix",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 21,
+          "n_dev": 5,
+          "n_test": 2
+        },
+        {
+          "phrase": "cervical",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 6,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "ovary",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 23,
+          "n_dev": 7,
+          "n_test": 0
+        },
+        {
+          "phrase": "ovaries",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 6,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "ovarian",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 19,
+          "n_dev": 1,
+          "n_test": 0
+        },
+        {
+          "phrase": "fallopian tube",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 24,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "fallopian tubes",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "right tube",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 6,
+          "n_test": 2
+        },
+        {
+          "phrase": "left tube",
+          "priority": "test_only",
+          "splits": [
+            "dev",
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 4,
+          "n_test": 3
+        },
+        {
+          "phrase": "parametrium",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "myometrium",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 3,
+          "n_test": 2
+        },
+        {
+          "phrase": "endometrium",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 15,
+          "n_dev": 7,
+          "n_test": 2
+        },
+        {
+          "phrase": "endometrial",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 18,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "endometrial cavity",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "uterine serosal surface",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "cornu",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "across the cornu",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "fundus",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 19,
+          "n_dev": 6,
+          "n_test": 1
+        },
+        {
+          "phrase": "fundus to os",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "os",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "posterior wall",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "breast",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 35,
+          "n_dev": 3,
+          "n_test": 0
+        },
+        {
+          "phrase": "nipple",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 11,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "axilla",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "axillary",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 10,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "thyroid",
+          "priority": "test_only",
+          "splits": [
+            "dev",
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 11,
+          "n_test": 1
+        },
+        {
+          "phrase": "hemithyroid",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "background thyroid",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "lung",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 12,
+          "n_dev": 10,
+          "n_test": 2
+        },
+        {
+          "phrase": "lobe",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 5,
+          "n_dev": 3,
+          "n_test": 1
+        },
+        {
+          "phrase": "left lower lobe",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 1,
+          "n_test": 1
+        },
+        {
+          "phrase": "left upper lobe",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 3,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "lung nodule",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "pleura",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "pleural",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "pleural surface",
+          "priority": "test_only",
+          "splits": [
+            "dev",
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 1,
+          "n_test": 1
+        },
+        {
+          "phrase": "subpleural",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "visceral pleura",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "kidney",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "renal",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 5,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "liver",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "gallbladder",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 19,
+          "n_dev": 4,
+          "n_test": 0
+        },
+        {
+          "phrase": "cystic duct",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "stomach",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 7,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "gastric",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 26,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "colon",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 13,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "colonic",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "sigmoid",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "sigmoid colon",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "ascending colon",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "appendix",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "omentum",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "skin",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 14,
+          "n_dev": 6,
+          "n_test": 2
+        },
+        {
+          "phrase": "skin tissue",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 4,
+          "n_test": 1
+        },
+        {
+          "phrase": "skin surface",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "ear",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "oral cavity",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "maxillary sinus",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "vallecular cyst",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "soft tissue",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 20,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "fibrofatty",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 11,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "fibroadipose",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "adipose",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "antero-posteriorly",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 6,
+          "n_test": 1
+        },
+        {
+          "phrase": "anteroposteriorly",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "anteriour",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 25,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "longitudinally",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "medial",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "lateral",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 13,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "superior",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 22,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "inferior",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "anterior",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "posterior",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "superficial",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "deep",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 28,
+          "n_dev": 2,
+          "n_test": 2
+        },
+        {
+          "phrase": "proximal",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "distal",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "apical",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "bilateral",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 13,
+          "n_dev": 3,
+          "n_test": 1
+        },
+        {
+          "phrase": "right",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 39,
+          "n_dev": 18,
+          "n_test": 3
+        },
+        {
+          "phrase": "left",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 58,
+          "n_dev": 18,
+          "n_test": 8
+        }
+      ]
+    },
+    {
+      "id": "lesions",
+      "title": "病变名称",
+      "note": "",
+      "items": [
+        {
+          "phrase": "fibroid",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 28,
+          "n_dev": 12,
+          "n_test": 2
+        },
+        {
+          "phrase": "fibroids",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 19,
+          "n_dev": 10,
+          "n_test": 4
+        },
+        {
+          "phrase": "uterine fibroids",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "intramural",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "subserosal fibroids",
+          "priority": "test_only",
+          "splits": [
+            "dev",
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "bulging fibroids",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "myometrial mass",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "polyp",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 33,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "polypoid",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 11,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "hyperplastic polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 14,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "fundus polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "fibroid polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "cyst",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 38,
+          "n_dev": 5,
+          "n_test": 1
+        },
+        {
+          "phrase": "paratubal cyst",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 1,
+          "n_dev": 3,
+          "n_test": 1
+        },
+        {
+          "phrase": "ovarian cyst",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 11,
+          "n_dev": 1,
+          "n_test": 0
+        },
+        {
+          "phrase": "haemorrhagic cyst",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "nodule",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 12,
+          "n_dev": 10,
+          "n_test": 7
+        },
+        {
+          "phrase": "whitish nodule",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "soft oval nodule",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "mass",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 28,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "tumour",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 51,
+          "n_dev": 2,
+          "n_test": 3
+        },
+        {
+          "phrase": "tumor",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "whitish tumour",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "indurated tumour",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 5,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "tubal mass",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "gastritis",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "chronic gastritis",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "intestinal metaplasia",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 13,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "helicobacter",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 16,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "dysplasia",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 13,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "malignancy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 14,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "abscess",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 2,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "bulla",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 5,
+          "n_dev": 0,
+          "n_test": 0
+        }
+      ]
+    },
+    {
+      "id": "descriptors",
+      "title": "大体形态 / 颜色 / 质地",
+      "note": "",
+      "items": [
+        {
+          "phrase": "tan",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 64,
+          "n_dev": 23,
+          "n_test": 1
+        },
+        {
+          "phrase": "tan-coloured",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 16,
+          "n_dev": 23,
+          "n_test": 0
+        },
+        {
+          "phrase": "whitish",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 12,
+          "n_dev": 12,
+          "n_test": 2
+        },
+        {
+          "phrase": "white",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "pink",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "pinkish",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 15,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "red",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "reddish",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "brown",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "brownish",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "yellow",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 11,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "yellowish",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 11,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "black",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 15,
+          "n_dev": 6,
+          "n_test": 3
+        },
+        {
+          "phrase": "blackish",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 8,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "greyish",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "blue",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 11,
+          "n_dev": 8,
+          "n_test": 2
+        },
+        {
+          "phrase": "firm",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 40,
+          "n_dev": 10,
+          "n_test": 2
+        },
+        {
+          "phrase": "soft",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 32,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "solid",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "cystic",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 7,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "homogeneous",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "homogeneous tan",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "haemorrhagic",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "haemorrhagic cystic change",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "congested",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "indurated",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 12,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "irregular",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 35,
+          "n_dev": 1,
+          "n_test": 0
+        },
+        {
+          "phrase": "oval",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 10,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "elongated",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "nodular",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 6,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "polypoid",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 11,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "smooth",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 5,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "puckered",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "focally puckered",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "translucent",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "translucent light brown",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "membraneous",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "fibrofatty",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 11,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "fatty",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "unremarkable",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 19,
+          "n_dev": 2,
+          "n_test": 2
+        },
+        {
+          "phrase": "grossly unremarkable",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "hyperplastic",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 18,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "benign",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "focal",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 15,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "mild",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 31,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "chronic",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 16,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "pink firm tissue",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "tan cut surfaces",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "no necrosis or haemorrhage",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "necrosis",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "haemorrhage",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 7,
+          "n_dev": 4,
+          "n_test": 1
+        }
+      ]
+    },
+    {
+      "id": "findings_stock_phrases",
+      "title": "阴性/常见诊断套话",
+      "note": "",
+      "items": [
+        {
+          "phrase": "grossly unremarkable",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "no malignancy is seen",
+          "priority": "train_only",
+          "splits": [],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 0,
+          "note": "not found as exact string; keep as related variant"
+        },
+        {
+          "phrase": "no helicobacter seen",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "no necrosis or haemorrhage",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "no necrosis or haemorrhage can be identified",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 3,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "mild chronic inflammation",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 10,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "dysplasia or malignancy",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 13,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "type gastric mucosa",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 10,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "antral type",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "body type",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "compatible with hyperplastic polyp",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 7,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "no gross tumour",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "the cervix is grossly unremarkable",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "the adjacent myometrium is grossly unremarkable",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        }
+      ]
+    },
+    {
+      "id": "measurements",
+      "title": "测量与单位用词",
+      "note": "",
+      "items": [
+        {
+          "phrase": "mm",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 16
+        },
+        {
+          "phrase": "cm",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 12
+        },
+        {
+          "phrase": "gram",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 2
+        },
+        {
+          "phrase": "gramme",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 29,
+          "n_dev": 14,
+          "n_test": 0
+        },
+        {
+          "phrase": "weighs",
+          "priority": "test_only",
+          "splits": [
+            "dev",
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "weighing",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 14,
+          "n_dev": 10,
+          "n_test": 1
+        },
+        {
+          "phrase": "in length",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 13,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "in diameter",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 12,
+          "n_dev": 10,
+          "n_test": 2
+        },
+        {
+          "phrase": "in thickness",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 7,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "across",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 56,
+          "n_dev": 21,
+          "n_test": 5
+        },
+        {
+          "phrase": "in size",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 18,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "in greatest dimension",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 19,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "in aggregate",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 30,
+          "n_dev": 9,
+          "n_test": 0
+        },
+        {
+          "phrase": "from fundus to os",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "antero-posteriorly",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 6,
+          "n_test": 1
+        },
+        {
+          "phrase": "anteroposteriorly",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 3
+        },
+        {
+          "phrase": "longitudinally",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 3
+        }
+      ]
+    },
+    {
+      "id": "block_and_cassette",
+      "title": "蜡块 / 编号口令",
+      "note": "",
+      "items": [
+        {
+          "phrase": "block A",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 23,
+          "n_dev": 7,
+          "n_test": 1
+        },
+        {
+          "phrase": "block B",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 17,
+          "n_dev": 2,
+          "n_test": 1
+        },
+        {
+          "phrase": "block C",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 17,
+          "n_dev": 1,
+          "n_test": 0
+        },
+        {
+          "phrase": "block D",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 13,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "block E",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 10,
+          "n_dev": 7,
+          "n_test": 0
+        },
+        {
+          "phrase": "blocks A to C",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 4,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "blocks D to F",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 2,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "frozen block",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 22,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "T-code",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "M-code",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 9,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "one block",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 15,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "two blocks",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 10,
+          "n_dev": 2,
+          "n_test": 0
+        },
+        {
+          "phrase": "total 2 blocks",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "total 4 個 blocks",
+          "priority": "test_only",
+          "splits": [
+            "test"
+          ],
+          "n_train": 0,
+          "n_dev": 0,
+          "n_test": 1
+        }
+      ]
+    },
+    {
+      "id": "code_switch",
+      "title": "中英夹杂与粤语旁白（真实域标签特征）",
+      "note": "",
+      "items": [
+        {
+          "phrase": "總數",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "test"
+          ],
+          "n_train": 26,
+          "n_dev": 0,
+          "n_test": 1
+        },
+        {
+          "phrase": "乘",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 135,
+          "n_dev": 36,
+          "n_test": 0
+        },
+        {
+          "phrase": "點",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 91,
+          "n_dev": 6,
+          "n_test": 0
+        },
+        {
+          "phrase": "個",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 57,
+          "n_dev": 41,
+          "n_test": 2
+        },
+        {
+          "phrase": "呀",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 16,
+          "n_dev": 16,
+          "n_test": 0
+        },
+        {
+          "phrase": "喎",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 6,
+          "n_dev": 7,
+          "n_test": 1
+        },
+        {
+          "phrase": "加",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 8,
+          "n_dev": 7,
+          "n_test": 0
+        },
+        {
+          "phrase": "第一隻",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "第二隻",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 6,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "四個",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 15,
+          "n_dev": 7,
+          "n_test": 0
+        },
+        {
+          "phrase": "兩個",
+          "priority": "train_only",
+          "splits": [
+            "train",
+            "dev"
+          ],
+          "n_train": 6,
+          "n_dev": 1,
+          "n_test": 0
+        },
+        {
+          "phrase": "一個",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 22,
+          "n_dev": 13,
+          "n_test": 1
+        },
+        {
+          "phrase": "c m",
+          "priority": "train_only",
+          "splits": [
+            "train"
+          ],
+          "n_train": 141,
+          "n_dev": 0,
+          "n_test": 0
+        },
+        {
+          "phrase": "m m",
+          "priority": "train_and_test",
+          "splits": [
+            "train",
+            "dev",
+            "test"
+          ],
+          "n_train": 180,
+          "n_dev": 88,
+          "n_test": 1
+        }
+      ]
+    }
+  ]
+}

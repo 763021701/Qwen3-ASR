@@ -1,0 +1,78 @@
+run_name: poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep
+
+dataset:
+  source_type: real_raw_denoised
+  language: "None"
+  validation_language: ""
+  raw_jsonl: raw/POC_train/real_target_domain/metadata_raw.jsonl
+  denoised_jsonl: raw/POC_train/real_target_domain/metadata_denoised.jsonl
+  test_source: raw/POC_test/metadata.jsonl
+  use_test_as_dev: 1
+  synthetic_jsonl: raw/POC_train/llm_text_syn/sentences.jsonl
+  synthetic_metadata_csv: /root/autodl-tmp/workspace/project/Medical-Speech-Synthesis/outputs/real_domain_phrases/tts_voxcpm2/metadata.csv
+  synthetic_audio_root: /root/autodl-tmp/workspace/project/Medical-Speech-Synthesis
+  synthetic_exclude_priorities: ""
+  additional_synthetic_csvs:
+    cantonese_specimen_number: raw/POC_train/cantonese_specimen_number/metadata.csv
+    cantonese_measure: raw/POC_train/cantonese_measure/metadata.csv
+  additional_synthetic_max_per_text: 2
+  output_dir: data/poc_train_real_llm_syn_cantonese_num_measure_2voice
+  train_jsonl: data/poc_train_real_llm_syn_cantonese_num_measure_2voice/train.jsonl
+  dev_jsonl: data/poc_train_real_llm_syn_cantonese_num_measure_2voice/dev.jsonl
+  test_jsonl: data/poc_train_real_llm_syn_cantonese_num_measure_2voice/test.jsonl
+  dev_fraction: 0.2
+  split_seed: 42
+  check_audio: 1
+
+training:
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep
+  batch_size: 2
+  grad_acc: 16
+  lr: 2e-5
+  lr_scheduler_type: linear
+  warmup_ratio: 0.02
+  epochs: 3
+  save_steps: 25
+  save_total_limit: 5
+  save_best_total_limit: 5
+  save_best_metric: cer
+  wer_eval_samples: 0
+  wer_batch_size: 2
+  wer_max_new_tokens: 512
+  log_steps: 10
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 2
+  strip_target_brackets: 1
+  augment: 1
+  augment_prob: 1.0
+  speed_prob: 0.5
+  speed_factors: "0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2"
+  noise_prob: 0.5
+  noise_snr_min: 5.0
+  noise_snr_max: 20.0
+  noise_dir: raw/POC_train/noise/noise_target_domain
+  specaug_prob: 0.5
+  specaug_time_mask_param: 50
+  specaug_freq_mask_param: 27
+  specaug_num_time_masks: 2
+  specaug_num_freq_masks: 2
+  nospeech_augment: 1
+  nospeech_prob: 0.3
+  nospeech_pad_min_sec: 0.5
+  nospeech_pad_max_sec: 3.0
+  nospeech_dual_max_speech_sec: 30.0
+
+evaluation:
+  eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py
+  language: ""
+  output_dir: outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep/eval
+  batch_size: 2
+  max_new_tokens: 512
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

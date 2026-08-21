@@ -1,0 +1,38 @@
+run_name: poc_train_real_only_sft_lr2e5_earlystop
+
+dataset:
+  source_type: prepared_jsonl
+  language: "None"
+  validation_language: ""
+  output_dir: data/poc_train_real_tcga_1to3_5silence_none
+  train_jsonl: data/poc_train_real_tcga_1to3_5silence_none/train_real_only.jsonl
+  dev_jsonl: data/poc_train_real_tcga_1to3_5silence_none/dev.jsonl
+  test_jsonl: data/poc_train_real_tcga_1to3_5silence_none/dev.jsonl
+  check_audio: 1
+
+training:
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_train_real_only_sft_lr2e5_earlystop
+  batch_size: 8
+  grad_acc: 4
+  lr: 2e-5
+  epochs: 3
+  save_steps: 25
+  save_total_limit: 5
+  save_best_total_limit: 5
+  save_best_metric: eval_loss
+  early_stopping_metric: eval_loss
+  early_stopping_patience: 5
+  early_stopping_threshold: 0.0
+  log_steps: 10
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 2
+  strip_target_brackets: 1
+  augment: 0
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

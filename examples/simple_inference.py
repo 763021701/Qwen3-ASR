@@ -72,7 +72,7 @@ def main():
             dtype=torch.bfloat16,
             device_map="cuda:0",
             max_inference_batch_size=32,
-            max_new_tokens=512,
+            max_new_tokens=1024,
         )
 
     print(f"Transcribing: {args.audio}")
