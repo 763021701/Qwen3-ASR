@@ -24,6 +24,7 @@ import random
 import re
 import shutil
 import string
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,6 +36,10 @@ from qwen_asr import Qwen3ASRModel
 from qwen_asr.inference.utils import parse_asr_output
 from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 if __package__:
     from .noise_augmentation import NoiseLibrary, maybe_add_noise
@@ -53,6 +58,39 @@ def _normalize_english(text: str) -> str:
     value = (text or "").lower()
     value = value.translate(str.maketrans("", "", string.punctuation))
     return _WER_WS_RE.sub(" ", value).strip()
+
+
+def _edit_distance(reference: str, hypothesis: str) -> int:
+    previous = list(range(len(hypothesis) + 1))
+    for ref_index, ref_char in enumerate(reference, start=1):
+        current = [ref_index]
+        for hyp_index, hyp_char in enumerate(hypothesis, start=1):
+            current.append(
+                min(
+                    previous[hyp_index] + 1,
+                    current[hyp_index - 1] + 1,
+                    previous[hyp_index - 1] + (ref_char != hyp_char),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _corpus_character_error_rate(
+    references: List[str], hypotheses: List[str]
+) -> float:
+    if len(references) != len(hypotheses):
+        raise ValueError("references and hypotheses must have the same length")
+    total_edits = 0
+    total_reference_chars = 0
+    for reference, hypothesis in zip(references, hypotheses):
+        ref_chars = reference.replace(" ", "")
+        hyp_chars = hypothesis.replace(" ", "")
+        total_edits += _edit_distance(ref_chars, hyp_chars)
+        total_reference_chars += len(ref_chars)
+    if total_reference_chars == 0:
+        return 0.0 if total_edits == 0 else 1.0
+    return total_edits / total_reference_chars
 
 
 def freeze_audio_tower(model) -> None:
@@ -159,6 +197,7 @@ def make_preprocess_fn_prefix_only(processor, curriculum: bool = False):
             "target": ex["text"],
             "prefix_text": prefix_text,
             "aug": ex.get("aug", 1),
+            "noise_aug": ex.get("noise_aug", 1),
         }
         if curriculum:
             out["target_none"] = _swap_language_to_none(ex["text"])
@@ -265,7 +304,12 @@ def apply_speed_perturbation(wav: np.ndarray, sr: int, factor: float) -> np.ndar
 
 
 def augment_waveform(
-    wav: np.ndarray, sr: int, cfg: AudioAugmentConfig, rng: random.Random
+    wav: np.ndarray,
+    sr: int,
+    cfg: AudioAugmentConfig,
+    rng: random.Random,
+    *,
+    noise_enabled: bool = True,
 ) -> np.ndarray:
     if not cfg.enabled or rng.random() > cfg.augment_prob:
         return wav
@@ -276,15 +320,16 @@ def augment_waveform(
         else:
             factor = rng.choice(cfg.speed_factors)
         out = apply_speed_perturbation(out, sr, factor)
-    out = maybe_add_noise(
-        out,
-        sr,
-        rng,
-        prob=cfg.noise_prob,
-        snr_min=cfg.noise_snr_min,
-        snr_max=cfg.noise_snr_max,
-        library=cfg.noise_library,
-    )
+    if noise_enabled:
+        out = maybe_add_noise(
+            out,
+            sr,
+            rng,
+            prob=cfg.noise_prob,
+            snr_min=cfg.noise_snr_min,
+            snr_max=cfg.noise_snr_max,
+            library=cfg.noise_library,
+        )
     return out
 
 
@@ -328,6 +373,7 @@ class DataCollatorForQwen3ASRFinetuning:
             targets = [f.get("target_none", f["target"]) for f in features]
         else:
             targets = [f["target"] for f in features]
+        noise_flags = [int(f.get("noise_aug", 1)) for f in features]
 
         cfg = self.augment
         use_aug = cfg is not None and cfg.enabled
@@ -344,6 +390,7 @@ class DataCollatorForQwen3ASRFinetuning:
                 rng,
                 cfg.nospeech,
                 self.sampling_rate,
+                noise_flags=noise_flags,
             )
         if self.strip_target_brackets:
             targets = [strip_target_brackets(target) for target in targets]
@@ -353,10 +400,16 @@ class DataCollatorForQwen3ASRFinetuning:
 
         if use_aug:
             audios = [
-                augment_waveform(wav, self.sampling_rate, cfg, rng)
+                augment_waveform(
+                    wav,
+                    self.sampling_rate,
+                    cfg,
+                    rng,
+                    noise_enabled=bool(noise_aug),
+                )
                 if aug == 1
                 else wav
-                for wav, aug in zip(audios, aug_flags)
+                for wav, aug, noise_aug in zip(audios, aug_flags, noise_flags)
             ]
 
         full_inputs, prefix_inputs = build_processor_batch_inputs(
@@ -642,6 +695,8 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         speed_min=0.8,
         speed_max=1.6,
         seed=1234,
+        metric="wer",
+        output_dir="",
     ):
         super().__init__(limit)
         self.asr_wrapper = asr_wrapper
@@ -652,7 +707,12 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         self.eval_speed_aug = bool(eval_speed_aug)
         self.speed_min = speed_min
         self.speed_max = speed_max
+        if metric not in {"wer", "cer"}:
+            raise ValueError("Generation checkpoint metric must be wer or cer")
         self.seed = seed
+        self.metric = metric
+        self.ranking_filename = f"best_{metric}_checkpoints.json"
+        self.predictions_dir = os.path.join(output_dir, "generation_eval") if output_dir else ""
         self._subset = None
 
     def _load_ranking(self, output_dir: str) -> None:
@@ -663,7 +723,7 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
             with open(path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             for item in data.get("checkpoints", []):
-                value = item.get("wer", item.get("eval_loss"))
+                value = item.get(self.metric, item.get("eval_loss"))
                 if value is not None:
                     self.eval_losses[int(item["step"])] = float(value)
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
@@ -673,14 +733,14 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         path = self._ranking_path(output_dir)
         tmp_path = path + ".tmp"
         payload = {
-            "metric": "wer",
+            "metric": self.metric,
             "greater_is_better": False,
             "limit": self.limit,
             "checkpoints": [
                 {
                     "rank": rank,
                     "step": step,
-                    "wer": value,
+                    self.metric: value,
                     "path": os.path.abspath(ckpt_dir),
                 }
                 for rank, (value, step, ckpt_dir) in enumerate(ranked, start=1)
@@ -716,9 +776,7 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
             wav = apply_speed_perturbation(wav, self.sr, factor)
         return wav
 
-    def _compute_wer(self) -> float:
-        from masr_eval_pkg import compute_wer
-
+    def _compute_error_rate(self) -> tuple[float, List[Dict[str, str]]]:
         items = self._build_subset()
         hypotheses = [""] * len(items)
         model = self.asr_wrapper.model
@@ -738,19 +796,59 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         finally:
             model.train(was_training)
 
-        references = [_normalize_english(reference) for _, reference, _ in items]
-        hypotheses = [_normalize_english(hypothesis) for hypothesis in hypotheses]
-        return float(compute_wer(references, hypotheses)["wer"])
+        if self.metric == "cer":
+            from evaluation.english_medical.text_normalization import normalize_english
+
+            records = [
+                {
+                    "audio": audio,
+                    "reference": reference,
+                    "reference_normalized": normalize_english(reference),
+                    "hypothesis": hypothesis,
+                    "hypothesis_normalized": normalize_english(hypothesis),
+                }
+                for (audio, reference, _), hypothesis in zip(items, hypotheses)
+            ]
+            references = [record["reference_normalized"] for record in records]
+            normalized_hypotheses = [record["hypothesis_normalized"] for record in records]
+            return _corpus_character_error_rate(references, normalized_hypotheses), records
+
+        from masr_eval_pkg import compute_wer
+
+        records = [
+            {
+                "audio": audio,
+                "reference": reference,
+                "reference_normalized": _normalize_english(reference),
+                "hypothesis": hypothesis,
+                "hypothesis_normalized": _normalize_english(hypothesis),
+            }
+            for (audio, reference, _), hypothesis in zip(items, hypotheses)
+        ]
+        references = [record["reference_normalized"] for record in records]
+        normalized_hypotheses = [record["hypothesis_normalized"] for record in records]
+        return float(compute_wer(references, normalized_hypotheses)["wer"]), records
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if args.process_index != 0 or self.eval_dataset is None:
             return control
-        wer = self._compute_wer()
-        if metrics is not None and math.isfinite(wer):
-            metrics["wer"] = wer
-        if math.isfinite(wer):
-            self.eval_losses[int(state.global_step)] = wer
-        print("[best-wer] step=%d wer=%.4f" % (state.global_step, wer))
+        value, records = self._compute_error_rate()
+        if self.predictions_dir and records:
+            os.makedirs(self.predictions_dir, exist_ok=True)
+            predictions_path = os.path.join(
+                self.predictions_dir, f"step-{int(state.global_step)}_predictions.jsonl"
+            )
+            with open(predictions_path, "w", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if metrics is not None and math.isfinite(value):
+            metrics[self.metric] = value
+        if math.isfinite(value):
+            self.eval_losses[int(state.global_step)] = value
+        print(
+            "[best-%s] step=%d %s=%.4f"
+            % (self.metric, state.global_step, self.metric, value)
+        )
         return control
 
 
@@ -911,16 +1009,18 @@ def parse_args():
         "--save_best_metric",
         type=str,
         default="eval_loss",
-        choices=("eval_loss", "wer"),
-        help="Metric for --save_best_total_limit: eval_loss (default) or wer "
-             "(macro CER over Uyghur+Mandarin dev via generation).",
+        choices=("eval_loss", "wer", "cer"),
+        help="Metric for --save_best_total_limit: eval_loss, WER, or normalized CER.",
     )
     p.add_argument("--wer_eval_samples", type=int, default=400,
                    help="Capped dev subset size for the WER selection metric (balanced by random subset).")
     p.add_argument("--wer_batch_size", type=int, default=4,
                    help="Inference batch size for the WER selection generation.")
+    p.add_argument("--wer_max_new_tokens", type=int, default=512,
+                   help="Max new tokens for the in-training WER/CER selection generation "
+                        "(passed to the ASR wrapper).")
     p.add_argument("--early_stopping_metric", type=str, default="eval_loss",
-                   choices=("eval_loss", "wer"))
+                   choices=("eval_loss", "wer", "cer"))
     p.add_argument("--early_stopping_patience", type=int, default=0)
     p.add_argument("--early_stopping_threshold", type=float, default=0.0)
     p.add_argument("--eval_speed_aug", type=int, default=0, choices=(0, 1),
@@ -979,6 +1079,7 @@ def main():
         args_cli.model_path,
         dtype=torch.bfloat16 if use_bf16 else torch.float16,
         device_map=None,
+        max_new_tokens=args_cli.wer_max_new_tokens,
     )
     model = asr_wrapper.model
     processor = asr_wrapper.processor
@@ -1007,7 +1108,7 @@ def main():
         num_proc=1,
     )
 
-    keep = {"prompt", "audio", "target", "prefix_text", "aug"}
+    keep = {"prompt", "audio", "target", "prefix_text", "aug", "noise_aug"}
     if args_cli.curriculum:
         keep.add("target_none")
     for split in ds.keys():
@@ -1034,8 +1135,8 @@ def main():
     keep_best_limit = args_cli.save_best_total_limit if args_cli.eval_file else 0
     if args_cli.save_best_total_limit > 0 and not args_cli.eval_file:
         raise ValueError("--save_best_total_limit requires --eval_file")
-    if args_cli.save_best_metric == "wer" and not args_cli.eval_file:
-        raise ValueError("--save_best_metric wer requires --eval_file")
+    if args_cli.save_best_metric in {"wer", "cer"} and not args_cli.eval_file:
+        raise ValueError("--save_best_metric wer/cer requires --eval_file")
 
     training_args = TrainingArguments(
         output_dir=args_cli.output_dir,
@@ -1066,7 +1167,7 @@ def main():
 
     callbacks = [MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)]
     if keep_best_limit > 0:
-        if args_cli.save_best_metric == "wer":
+        if args_cli.save_best_metric in {"wer", "cer"}:
             callbacks.append(KeepBestWerCheckpointsCallback(
                 limit=keep_best_limit,
                 asr_wrapper=asr_wrapper,
@@ -1077,6 +1178,8 @@ def main():
                 eval_speed_aug=bool(args_cli.eval_speed_aug),
                 speed_min=args_cli.eval_speed_min,
                 speed_max=args_cli.eval_speed_max,
+                metric=args_cli.save_best_metric,
+                output_dir=args_cli.output_dir,
             ))
         else:
             callbacks.append(KeepBestCheckpointsCallback(limit=keep_best_limit))
@@ -1084,9 +1187,9 @@ def main():
         if not args_cli.eval_file:
             raise ValueError("--early_stopping_patience requires --eval_file")
         ranking_filename = (
-            "best_wer_checkpoints.json"
-            if args_cli.early_stopping_metric == "wer"
-            else "best_checkpoints.json"
+            "best_checkpoints.json"
+            if args_cli.early_stopping_metric == "eval_loss"
+            else f"best_{args_cli.early_stopping_metric}_checkpoints.json"
         )
         callbacks.append(
             StopOnMetricPlateauCallback(

@@ -45,6 +45,12 @@ def extract_asr_text(text: str) -> str:
     return value
 
 
+def language_prefix(text: str) -> str:
+    """Return the Qwen3-ASR language prefix used for pairing."""
+    match = _LANG_PREFIX_RE.match(text or "")
+    return match.group(1) if match else ""
+
+
 def merge_asr_targets(text1: str, text2: str) -> str:
     """Merge two Qwen3-ASR labels, concatenating asr_text bodies."""
     t1 = text1 or ""
@@ -52,12 +58,21 @@ def merge_asr_targets(text1: str, text2: str) -> str:
     asr1 = extract_asr_text(t1).strip()
     asr2 = extract_asr_text(t2).strip()
     merged_asr = f"{asr1} {asr2}".strip()
-    match = _LANG_PREFIX_RE.match(t1)
-    if match:
-        return f"{match.group(1)}{merged_asr}"
-    if _ASR_TEXT_TAG in t1:
-        return t1.split(_ASR_TEXT_TAG, 1)[0] + _ASR_TEXT_TAG + merged_asr
-    return merged_asr
+    match1 = _LANG_PREFIX_RE.match(t1)
+    match2 = _LANG_PREFIX_RE.match(t2)
+
+    if asr1 and match1:
+        prefix = match1.group(1)
+    elif asr2 and match2:
+        prefix = match2.group(1)
+    elif match1:
+        prefix = match1.group(1)
+    elif match2:
+        prefix = match2.group(1)
+    else:
+        return merged_asr
+
+    return f"{prefix}{merged_asr}"
 
 
 def zero_pad(
@@ -90,11 +105,20 @@ def try_dual_concat(
     rng: random.Random,
     cfg: NoSpeechAugmentConfig,
     sr: int,
+    noise_flags: Optional[Sequence[int]] = None,
 ) -> Optional[Tuple[np.ndarray, str]]:
     """Concatenate wav[index] with another batch item if within duration limit."""
     if len(wavs) < 2:
         return None
-    candidates = [j for j in range(len(wavs)) if j != index]
+    prefix = language_prefix(targets[index])
+    noise_flag = int(noise_flags[index]) if noise_flags is not None else None
+    candidates = [
+        j
+        for j in range(len(wavs))
+        if j != index
+        and language_prefix(targets[j]) == prefix
+        and (noise_flags is None or int(noise_flags[j]) == noise_flag)
+    ]
     rng.shuffle(candidates)
     wav_i = np.asarray(wavs[index], dtype=np.float32)
     dur_i = len(wav_i) / sr
@@ -132,6 +156,7 @@ def apply_nospeech_augment(
     rng: random.Random,
     cfg: NoSpeechAugmentConfig,
     sr: int,
+    noise_flags: Optional[Sequence[int]] = None,
 ) -> Tuple[List[np.ndarray], List[str]]:
     """Apply no-speech augmentation to a batch of waveforms and targets."""
     if not cfg.enabled:
@@ -149,7 +174,15 @@ def apply_nospeech_augment(
 
         mode = rng.choice(modes)
         if mode == "dual_concat":
-            dual = try_dual_concat(i, out_wavs, out_targets, rng, cfg, sr)
+            dual = try_dual_concat(
+                i,
+                out_wavs,
+                out_targets,
+                rng,
+                cfg,
+                sr,
+                noise_flags=noise_flags,
+            )
             if dual is not None:
                 out_wavs[i], out_targets[i] = dual
                 continue
