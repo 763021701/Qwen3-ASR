@@ -42,10 +42,14 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 if __package__:
+    from .module_freeze import (PARTS, count_part_parameters, parse_parts,
+                                set_part_freeze)
     from .noise_augmentation import NoiseLibrary, maybe_add_noise
     from .nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
     from .processor_collate import build_processor_batch_inputs
 else:
+    from module_freeze import (PARTS, count_part_parameters, parse_parts,
+                               set_part_freeze)
     from noise_augmentation import NoiseLibrary, maybe_add_noise
     from nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
     from processor_collate import build_processor_batch_inputs
@@ -93,13 +97,6 @@ def _corpus_character_error_rate(
     return total_edits / total_reference_chars
 
 
-def freeze_audio_tower(model) -> None:
-    if not hasattr(model, "thinker") or not hasattr(model.thinker, "audio_tower"):
-        raise RuntimeError("Cannot freeze audio tower: model.thinker.audio_tower not found.")
-    audio_tower = model.thinker.audio_tower
-    audio_tower.requires_grad_(False)
-    audio_tower.eval()
-
 def patch_outer_forward(model):
     cls = model.__class__
     if getattr(cls, "_forward_patched", False):
@@ -130,12 +127,6 @@ def patch_outer_forward(model):
 
     cls.forward = forward
     cls._forward_patched = True
-
-def count_parameters(module) -> Tuple[int, int]:
-    total = sum(p.numel() for p in module.parameters())
-    trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
-    return total, trainable
-
 
 _CKPT_RE = re.compile(r"^checkpoint-(\d+)$")
 
@@ -899,25 +890,27 @@ class StopOnMetricPlateauCallback(TrainerCallback):
         return control
 
 
-class KeepAudioTowerFrozenCallback(TrainerCallback):
+class KeepFrozenPartsCallback(TrainerCallback):
+    """Re-apply per-part freezing after Trainer flips module train/eval modes."""
+
+    def __init__(self, frozen_parts):
+        self.frozen_parts = tuple(frozen_parts)
+
+    def _refreeze(self, model) -> None:
+        if model is not None:
+            set_part_freeze(model, self.frozen_parts)
+
     def on_train_begin(self, args, state, control, model=None, **kwargs):
-        self._freeze(model)
+        self._refreeze(model)
         return control
 
     def on_step_begin(self, args, state, control, model=None, **kwargs):
-        self._freeze(model)
+        self._refreeze(model)
         return control
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
-        self._freeze(model)
+        self._refreeze(model)
         return control
-
-    @staticmethod
-    def _freeze(model) -> None:
-        if model is None or not hasattr(model, "thinker") or not hasattr(model.thinker, "audio_tower"):
-            return
-        model.thinker.audio_tower.requires_grad_(False)
-        model.thinker.audio_tower.eval()
 
 
 class CurriculumEpochCallback(TrainerCallback):
@@ -960,11 +953,20 @@ def parse_args():
     p.add_argument("--lr_llm", type=float, default=None)
     p.add_argument("--warmup_ratio", type=float, default=0.02)
     p.add_argument(
+        "--freeze_modules",
+        type=str,
+        default="",
+        help="Comma-separated parts to freeze: encoder,aligner,llm. "
+             "encoder=audio_tower minus the aligner projections; "
+             "aligner=audio_tower conv_out/proj1/proj2; llm=thinker.model+lm_head. "
+             "Empty (default) trains all parts.",
+    )
+    p.add_argument(
         "--freeze_audio_tower",
         type=int,
         default=0,
         choices=(0, 1),
-        help="Freeze model.thinker.audio_tower and train only text/LLM-side parameters.",
+        help="Deprecated alias for --freeze_modules encoder,aligner.",
     )
     p.add_argument(
         "--curriculum",
@@ -1086,15 +1088,18 @@ def main():
     patch_outer_forward(model)
 
     model.generation_config = GenerationConfig.from_model_config(model.config)
+    frozen_parts = list(parse_parts(args_cli.freeze_modules))
     if args_cli.freeze_audio_tower == 1:
-        freeze_audio_tower(model)
-        total, trainable = count_parameters(model)
-        audio_total, audio_trainable = count_parameters(model.thinker.audio_tower)
-        print(
-            "[freeze] audio_tower frozen: total_params=%d trainable_params=%d "
-            "audio_tower_total=%d audio_tower_trainable=%d"
-            % (total, trainable, audio_total, audio_trainable)
-        )
+        frozen_parts += [p for p in ("encoder", "aligner") if p not in frozen_parts]
+    if frozen_parts:
+        set_part_freeze(model, frozen_parts)
+        part_counts = count_part_parameters(model)
+        for part in PARTS:
+            total, trainable = part_counts[part]
+            print(
+                "[freeze] %-7s total_params=%d trainable_params=%d"
+                % (part, total, trainable)
+            )
 
     raw_ds = load_dataset(
         "json",
@@ -1199,8 +1204,8 @@ def main():
                 ranking_filename=ranking_filename,
             )
         )
-    if args_cli.freeze_audio_tower == 1:
-        callbacks.append(KeepAudioTowerFrozenCallback())
+    if frozen_parts:
+        callbacks.append(KeepFrozenPartsCallback(frozen_parts))
     if args_cli.curriculum:
         callbacks.append(CurriculumEpochCallback(train_collator, args_cli.curriculum_switch_epoch))
 

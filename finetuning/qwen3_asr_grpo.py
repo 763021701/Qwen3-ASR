@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # coding=utf-8
-"""LLM-only GRPO post-training for Qwen3-ASR.
+"""GRPO post-training for Qwen3-ASR.
 
-Every rollout group shares one frozen audio-tower/aligner encoding. Only the
-text decoder and LM head are optimized against a group-relative, reference
-WER/CER reward. The implementation follows the rollout -> group advantage -> clipped
+By default only the text decoder and LM head are optimized (audio tower and
+aligner frozen); ``--freeze_modules`` controls freezing per part
+(encoder / aligner / llm). When an audio part is trainable, the training-time
+forward recomputes audio features through the live audio tower so those
+parameters receive gradients; rollout sampling always reuses one shared
+encoding per group. Optimized against a group-relative, reference WER/CER
+reward. The implementation follows the rollout -> group advantage -> clipped
 policy loss plus reference-KL structure used by minimind's GRPO trainer.
 """
 
@@ -29,6 +33,13 @@ from transformers import GenerationConfig
 
 from qwen_asr import Qwen3ASRModel
 from qwen_asr.inference.utils import parse_asr_output
+
+if __package__:
+    from .module_freeze import (PARTS, count_part_parameters, parse_parts,
+                                set_part_freeze)
+else:
+    from module_freeze import (PARTS, count_part_parameters, parse_parts,
+                               set_part_freeze)
 
 
 _ASR_TEXT_TAG = "<asr_text>"
@@ -219,6 +230,7 @@ class RolloutBatch:
     repeated_audio_features: torch.Tensor
     repeated_feature_attention_mask: torch.Tensor
     raw_completions: List[str]
+    num_generations: int
 
 
 @torch.no_grad()
@@ -286,16 +298,38 @@ def rollout_groups(
         repeated_audio_features=repeated_audio_features,
         repeated_feature_attention_mask=repeated_feature_attention,
         raw_completions=list(raw_completions),
+        num_generations=num_generations,
     )
 
 
 def completion_logps(
     thinker: Any,
     rollout: RolloutBatch,
+    live_audio: Tuple[torch.Tensor, torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute raw-model log p(completion token | prompt, frozen audio evidence)."""
+    """Compute raw-model log p(completion token | prompt, audio evidence).
+
+    With ``live_audio=(input_features, feature_attention_mask)`` the audio
+    features are recomputed through the (possibly trainable) audio tower so
+    encoder/aligner parameters receive gradients; otherwise the detached
+    rollout-time features are reused.
+    """
+    if live_audio is None:
+        audio_features = rollout.repeated_audio_features
+    else:
+        input_features, feature_attention_mask = live_audio
+        audio_features = thinker.get_audio_features(
+            input_features, feature_attention_mask=feature_attention_mask
+        )
+        prompt_width = rollout.full_ids.shape[1] - rollout.completion_ids.shape[1]
+        audio_features = _repeat_audio_features(
+            audio_features,
+            rollout.full_ids[:, :prompt_width],
+            thinker.config.audio_token_id,
+            rollout.num_generations,
+        )
     inputs_embeds = _merge_audio_embeddings(
-        thinker, rollout.full_ids, rollout.repeated_audio_features
+        thinker, rollout.full_ids, audio_features
     )
     outputs = thinker(
         input_ids=rollout.full_ids,
@@ -354,18 +388,11 @@ def _prepare_prefix_inputs(
     return inputs.to(device).to(dtype)
 
 
-def _freeze_audio_and_enable_llm(model: Any) -> Tuple[int, int]:
-    thinker = model.thinker
-    if not hasattr(thinker, "audio_tower") or not hasattr(thinker, "model"):
-        raise RuntimeError("Expected a Qwen3-ASR thinker with audio_tower and text model.")
-    model.requires_grad_(False)
-    thinker.audio_tower.requires_grad_(False)
-    thinker.audio_tower.eval()
-    thinker.model.requires_grad_(True)
-    thinker.lm_head.requires_grad_(True)
-    trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
-    frozen_audio = sum(param.numel() for param in thinker.audio_tower.parameters())
-    return trainable, frozen_audio
+def _resolve_frozen_parts(args: argparse.Namespace) -> List[str]:
+    """Parts frozen for this run; unset --freeze_modules keeps the legacy LLM-only default."""
+    if args.freeze_modules is None:
+        return list(parse_parts("encoder,aligner"))
+    return list(parse_parts(args.freeze_modules))
 
 
 def _save_checkpoint(
@@ -391,7 +418,7 @@ def _save_checkpoint(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="LLM-only GRPO post-training for Qwen3-ASR.")
+    parser = argparse.ArgumentParser(description="GRPO post-training for Qwen3-ASR (default: LLM-only).")
     parser.add_argument("--model_path", required=True, help="SFT checkpoint or base Qwen3-ASR model path.")
     parser.add_argument("--train_file", required=True, help="JSONL with audio, text, and optional prompt.")
     parser.add_argument("--output_dir", required=True)
@@ -427,6 +454,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_samples", type=int, default=0)
     parser.add_argument("--sr", type=int, default=16000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--freeze_modules",
+        default=None,
+        help="Comma-separated parts to freeze: encoder,aligner,llm. Unset keeps the "
+             "legacy default (encoder,aligner frozen; LLM trained). Empty string: no freeze. "
+             "Note: trainable audio parts recompute audio features in the training forward.",
+    )
     parser.add_argument("--dry_run", type=int, default=0, choices=(0, 1))
     return parser.parse_args()
 
@@ -463,14 +497,18 @@ def main() -> None:
             % (args.model_path, args.batch_size, args.num_generations, args.max_new_tokens)
         )
         print("[dry-run] first_audio=%s" % sample["audio"])
+        frozen_parts = _resolve_frozen_parts(args)
+        trainable_parts = [p for p in PARTS if p not in frozen_parts]
         print(
-            "[dry-run] reward=%s; frozen=audio_tower (encoder + aligner); trainable=LLM"
+            "[dry-run] reward=%s; frozen=%s; trainable=%s"
             % (
                 "-CER"
                 if args.reward_mode == "cer"
                 else "-WER"
                 if args.reward_mode == "wer"
-                else "-(WER + %g*CER)" % args.cer_weight
+                else "-(WER + %g*CER)" % args.cer_weight,
+                ",".join(frozen_parts) or "none",
+                ",".join(trainable_parts) or "none",
             )
         )
         return
@@ -486,8 +524,13 @@ def main() -> None:
     policy_wrapper = Qwen3ASRModel.from_pretrained(args.model_path, dtype=dtype, device_map=None)
     policy_model = policy_wrapper.model.to(device)
     processor = policy_wrapper.processor
-    trainable_params, frozen_audio_params = _freeze_audio_and_enable_llm(policy_model)
-    print(f"[freeze] audio_tower={frozen_audio_params:,} trainable_llm={trainable_params:,}")
+    frozen_parts = _resolve_frozen_parts(args)
+    set_part_freeze(policy_model, frozen_parts)
+    part_counts = count_part_parameters(policy_model)
+    for part in PARTS:
+        total, trainable = part_counts[part]
+        print(f"[freeze] {part}: total={total:,} trainable={trainable:,}")
+    audio_trainable = "encoder" not in frozen_parts or "aligner" not in frozen_parts
 
     print(f"[load] reference={reference_path}")
     reference_wrapper = Qwen3ASRModel.from_pretrained(reference_path, dtype=dtype, device_map=None)
@@ -548,13 +591,18 @@ def main() -> None:
             ).to(device)
             advantages = group_advantages(rewards, args.num_generations)
 
+            live_audio = (
+                (prefix_inputs["input_features"], prefix_inputs["feature_attention_mask"])
+                if audio_trainable else None
+            )
             with torch.inference_mode():
-                old_logps = completion_logps(policy_model.thinker, rollout).detach()
+                old_logps = completion_logps(policy_model.thinker, rollout, live_audio).detach()
                 reference_logps = completion_logps(reference_model.thinker, rollout).detach()
 
             policy_model.train()
-            policy_model.thinker.audio_tower.eval()
-            new_logps = completion_logps(policy_model.thinker, rollout)
+            if not audio_trainable:
+                policy_model.thinker.audio_tower.eval()
+            new_logps = completion_logps(policy_model.thinker, rollout, live_audio)
             mask = rollout.completion_mask.to(dtype=new_logps.dtype)
             ratio = torch.exp(new_logps - old_logps)
             unclipped = ratio * advantages.unsqueeze(1)

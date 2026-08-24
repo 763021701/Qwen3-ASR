@@ -518,6 +518,7 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "warmup_ratio": "--warmup_ratio",
         "epochs": "--epochs",
         "freeze_audio_tower": "--freeze_audio_tower",
+        "freeze_modules": "--freeze_modules",
         "strip_target_brackets": "--strip_target_brackets",
         "save_steps": "--save_steps",
         "save_total_limit": "--save_total_limit",

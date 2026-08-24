@@ -61,6 +61,23 @@ LORA_TARGETS = {
     ),
 }
 
+def _resolve_lora_scope(scope: str) -> str:
+    """Resolve --lora_scope to a single target regex.
+
+    Accepts a legacy scope name or a comma-separated combination of scope
+    names (e.g. ``"aligner,llm"``); the result is the union of their regexes.
+    Parts without LoRA stay fully frozen (base weights are always frozen).
+    """
+    tokens = [t.strip() for t in scope.split(",") if t.strip()]
+    if not tokens:
+        raise ValueError("--lora_scope must name at least one part.")
+    regexes = []
+    for token in tokens:
+        if token not in LORA_TARGETS:
+            raise ValueError(f"Unknown lora_scope part {token!r}. Choices: {', '.join(LORA_TARGETS)}")
+        regexes.append(LORA_TARGETS[token])
+    return "|".join(regexes)
+
 def patch_outer_forward(model):
     cls = model.__class__
     if getattr(cls, "_forward_patched", False):
@@ -113,8 +130,7 @@ def apply_lora(model, args) -> bool:
         param.requires_grad = False
 
     scope = getattr(args, "lora_scope", "encoder_aligner")
-    if scope not in LORA_TARGETS:
-        raise ValueError(f"Unknown lora_scope {scope!r}. Choices: {list(LORA_TARGETS)}")
+    target_modules = _resolve_lora_scope(scope)
 
     lora_config = LoraConfig(
         r=int(getattr(args, "lora_r", 8)),
@@ -122,7 +138,7 @@ def apply_lora(model, args) -> bool:
         lora_dropout=float(getattr(args, "lora_dropout", 0.05)),
         bias=str(getattr(args, "lora_bias", "none")),
         task_type=TaskType.CAUSAL_LM,
-        target_modules=LORA_TARGETS[scope],
+        target_modules=target_modules,
     )
     model.thinker = get_peft_model(model.thinker, lora_config)
     model.thinker.print_trainable_parameters()
@@ -700,8 +716,9 @@ def parse_args():
     # LoRA (default off)
     p.add_argument("--use_lora", type=int, default=0, choices=(0, 1))
     p.add_argument("--lora_scope", type=str, default="encoder_aligner",
-                   choices=["encoder", "aligner", "encoder_aligner",
-                            "encoder_b4_aligner", "llm", "all"])
+                   help="LoRA target: legacy scopes (encoder, aligner, encoder_aligner, "
+                        "encoder_b4_aligner, llm, all) or a comma-separated combination "
+                        "of them (e.g. 'aligner,llm'). Parts without LoRA stay frozen.")
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--lora_alpha", type=int, default=16)
     p.add_argument("--lora_dropout", type=float, default=0.05)
