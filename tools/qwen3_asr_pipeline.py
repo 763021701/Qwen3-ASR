@@ -555,7 +555,6 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "nospeech_prob": "--nospeech_prob",
         "nospeech_pad_min_sec": "--nospeech_pad_min_sec",
         "nospeech_pad_max_sec": "--nospeech_pad_max_sec",
-        "nospeech_dual_max_speech_sec": "--nospeech_dual_max_speech_sec",
         "use_lora": "--use_lora",
         "lora_scope": "--lora_scope",
         "lora_r": "--lora_r",

@@ -57,7 +57,6 @@ training:
   nospeech_prob: 0.3
   nospeech_pad_min_sec: 0.5
   nospeech_pad_max_sec: 3.0
-  nospeech_dual_max_speech_sec: 30.0
 
 evaluation:
   eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py

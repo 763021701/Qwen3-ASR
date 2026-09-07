@@ -8,9 +8,6 @@ import numpy as np
 from finetuning.nospeech_augmentation import (
     NoSpeechAugmentConfig,
     apply_nospeech_augment,
-    extract_asr_text,
-    merge_asr_targets,
-    try_dual_concat,
     zero_pad,
 )
 
@@ -23,107 +20,6 @@ class NoSpeechAugmentationTest(unittest.TestCase):
         self.assertTrue(np.allclose(out[:50], 0.0))
         self.assertTrue(np.allclose(out[50:150], 1.0))
         self.assertTrue(np.allclose(out[150:], 0.0))
-
-    def test_merge_asr_targets(self):
-        t1 = "language English<asr_text>hello world"
-        t2 = "language English<asr_text>foo bar"
-        merged = merge_asr_targets(t1, t2)
-        self.assertEqual(merged, "language English<asr_text>hello world foo bar")
-        self.assertEqual(extract_asr_text(merged), "hello world foo bar")
-
-    def test_merge_silence_then_speech_uses_speech_language(self):
-        merged = merge_asr_targets(
-            "language None<asr_text>",
-            "language English<asr_text>patient is stable",
-        )
-
-        self.assertEqual(merged, "language English<asr_text>patient is stable")
-
-    def test_try_dual_concat_within_limit(self):
-        sr = 16000
-        cfg = NoSpeechAugmentConfig(enabled=True, dual_max_speech_sec=30.0)
-        wavs = [np.ones(sr, dtype=np.float32), np.ones(sr, dtype=np.float32)]
-        targets = [
-            "language English<asr_text>one",
-            "language English<asr_text>two",
-        ]
-        rng = random.Random(0)
-        result = try_dual_concat(0, wavs, targets, rng, cfg, sr)
-        self.assertIsNotNone(result)
-        merged_wav, merged_target = result
-        self.assertGreater(len(merged_wav), 2 * sr)
-        self.assertIn("one two", extract_asr_text(merged_target))
-
-    def test_try_dual_concat_exceeds_limit(self):
-        sr = 16000
-        cfg = NoSpeechAugmentConfig(enabled=True, dual_max_speech_sec=1.0)
-        wavs = [np.ones(sr, dtype=np.float32), np.ones(sr, dtype=np.float32)]
-        targets = [
-            "language English<asr_text>one",
-            "language English<asr_text>two",
-        ]
-        rng = random.Random(0)
-        self.assertIsNone(try_dual_concat(0, wavs, targets, rng, cfg, sr))
-
-    def test_try_dual_concat_rejects_different_language_prefix(self):
-        sr = 16000
-        cfg = NoSpeechAugmentConfig(enabled=True, dual_max_speech_sec=30.0)
-        wavs = [np.ones(sr, dtype=np.float32), np.ones(sr, dtype=np.float32)]
-        targets = [
-            "language English<asr_text>one",
-            "language None<asr_text>two",
-        ]
-
-        result = try_dual_concat(0, wavs, targets, random.Random(0), cfg, sr)
-
-        self.assertIsNone(result)
-
-    def test_try_dual_concat_rejects_different_noise_policy(self):
-        sr = 16000
-        cfg = NoSpeechAugmentConfig(enabled=True, dual_max_speech_sec=30.0)
-        wavs = [np.ones(sr, dtype=np.float32), np.ones(sr, dtype=np.float32)]
-        targets = [
-            "language None<asr_text>one",
-            "language None<asr_text>two",
-        ]
-
-        result = try_dual_concat(
-            0,
-            wavs,
-            targets,
-            random.Random(0),
-            cfg,
-            sr,
-            noise_flags=[0, 1],
-        )
-
-        self.assertIsNone(result)
-
-    def test_try_dual_concat_accepts_matching_pair_policy(self):
-        sr = 16000
-        cfg = NoSpeechAugmentConfig(enabled=True, dual_max_speech_sec=30.0)
-        wavs = [np.ones(sr, dtype=np.float32), np.ones(sr, dtype=np.float32)]
-        targets = [
-            "language None<asr_text>one",
-            "language None<asr_text>two",
-        ]
-
-        result = try_dual_concat(
-            0,
-            wavs,
-            targets,
-            random.Random(0),
-            cfg,
-            sr,
-            noise_flags=[1, 1],
-        )
-
-        self.assertIsNotNone(result)
-        _, merged_target = result
-        self.assertEqual(
-            merged_target,
-            "language None<asr_text>one two",
-        )
 
     def test_apply_nospeech_prob_zero_unchanged(self):
         sr = 16000
@@ -151,7 +47,7 @@ class NoSpeechAugmentationTest(unittest.TestCase):
         original_choice = rng.choice
 
         def forced_choice(options):
-            if set(options) == {"leading", "trailing", "dual_concat"}:
+            if set(options) == {"leading", "trailing"}:
                 return "trailing"
             return original_choice(options)
 
@@ -162,12 +58,47 @@ class NoSpeechAugmentationTest(unittest.TestCase):
         self.assertGreater(len(out_wavs[0]), sr)
         self.assertEqual(out_targets[0], targets[0])
 
-    def test_apply_nospeech_dual_concat_updates_target(self):
+    def test_apply_nospeech_leading_pad(self):
         sr = 16000
-        wavs = [
-            np.ones(sr, dtype=np.float32),
-            np.ones(sr, dtype=np.float32) * 2.0,
-        ]
+        wavs = [np.ones(sr, dtype=np.float32)]
+        targets = ["language English<asr_text>hello"]
+        cfg = NoSpeechAugmentConfig(
+            enabled=True,
+            prob=1.0,
+            pad_min_sec=0.5,
+            pad_max_sec=0.5,
+        )
+        rng = random.Random(1)
+        original_choice = rng.choice
+
+        def forced_choice(options):
+            if set(options) == {"leading", "trailing"}:
+                return "leading"
+            return original_choice(options)
+
+        rng.choice = forced_choice  # type: ignore[method-assign]
+        out_wavs, out_targets = apply_nospeech_augment(
+            wavs, targets, [1], rng, cfg, sr
+        )
+        self.assertGreater(len(out_wavs[0]), sr)
+        self.assertTrue(np.allclose(out_wavs[0][:8000], 0.0))
+        self.assertEqual(out_targets[0], targets[0])
+
+    def test_apply_nospeech_skips_aug_flag_zero(self):
+        sr = 16000
+        wavs = [np.ones(sr, dtype=np.float32)]
+        targets = ["language English<asr_text>hello"]
+        cfg = NoSpeechAugmentConfig(enabled=True, prob=1.0)
+        out_wavs, out_targets = apply_nospeech_augment(
+            wavs, targets, [0], random.Random(0), cfg, sr
+        )
+        self.assertEqual(len(out_wavs[0]), sr)
+        self.assertEqual(out_targets[0], targets[0])
+
+    def test_apply_nospeech_targets_unchanged_by_padding(self):
+        """Leading/trailing pads never alter the transcript text."""
+        sr = 16000
+        wavs = [np.ones(sr, dtype=np.float32), np.ones(sr, dtype=np.float32) * 2.0]
         targets = [
             "language English<asr_text>alpha",
             "language English<asr_text>beta",
@@ -176,23 +107,14 @@ class NoSpeechAugmentationTest(unittest.TestCase):
             enabled=True,
             prob=1.0,
             pad_min_sec=0.5,
-            pad_max_sec=0.5,
-            dual_max_speech_sec=30.0,
+            pad_max_sec=3.0,
         )
-        rng = random.Random(2)
-        original_choice = rng.choice
-
-        def forced_choice(options):
-            if set(options) == {"leading", "trailing", "dual_concat"}:
-                return "dual_concat"
-            return original_choice(options)
-
-        rng.choice = forced_choice  # type: ignore[method-assign]
         out_wavs, out_targets = apply_nospeech_augment(
-            wavs, targets, [1, 0], rng, cfg, sr
+            wavs, targets, [1, 1], random.Random(3), cfg, sr
         )
-        self.assertGreater(len(out_wavs[0]), sr)
-        self.assertIn("alpha beta", extract_asr_text(out_targets[0]))
+        self.assertEqual(out_targets, targets)
+        for out, original in zip(out_wavs, wavs):
+            self.assertGreater(len(out), len(original))
 
 
 if __name__ == "__main__":

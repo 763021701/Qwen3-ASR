@@ -711,7 +711,6 @@ def parse_args():
     p.add_argument("--nospeech_prob", type=float, default=0.3)
     p.add_argument("--nospeech_pad_min_sec", type=float, default=0.5)
     p.add_argument("--nospeech_pad_max_sec", type=float, default=3.0)
-    p.add_argument("--nospeech_dual_max_speech_sec", type=float, default=30.0)
 
     # LoRA (default off)
     p.add_argument("--use_lora", type=int, default=0, choices=(0, 1))
@@ -855,8 +854,8 @@ def main():
         if augment_cfg.nospeech.enabled:
             ns = augment_cfg.nospeech
             print(
-                "[augment] nospeech_prob=%s pad=%.1f-%.1fs dual_max=%.1fs"
-                % (ns.prob, ns.pad_min_sec, ns.pad_max_sec, ns.dual_max_speech_sec)
+                "[augment] nospeech_prob=%s pad=%.1f-%.1fs"
+                % (ns.prob, ns.pad_min_sec, ns.pad_max_sec)
             )
 
     resume_from = (args_cli.resume_from or "").strip()
