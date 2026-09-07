@@ -20,6 +20,7 @@ import os
 import random
 import re
 import string
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -33,6 +34,12 @@ from transformers import GenerationConfig
 
 from qwen_asr import Qwen3ASRModel
 from qwen_asr.inference.utils import parse_asr_output
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from evaluation.english_medical.text_normalization import normalize_english
 
 if __package__:
     from .module_freeze import (PARTS, count_part_parameters, parse_parts,
@@ -118,15 +125,44 @@ def asr_rewards(
     raw_completions: Sequence[str],
     reward_mode: str = "wer_cer",
     cer_weight: float = 0.0,
-) -> torch.Tensor:
-    """Return negative WER/CER rewards for generated ASR completions."""
+    *,
+    insertion_weight: float = 1.5,
+    deletion_weight: float = 1.0,
+    loop_weight: float = 0.5,
+    loop_min_ngram: int = 4,
+    loop_max_ngram: int = 48,
+    return_stats: bool = False,
+) -> torch.Tensor | Tuple[torch.Tensor, Dict[str, List[float]]]:
+    """Return negative WER/CER rewards for generated ASR completions.
+
+    ``weighted_cer_loop`` is the hallucination-guarded objective:
+    ``-( (S + deletion_weight*D + insertion_weight*I)/N + loop_weight*loop_pen )``
+    where ``loop_pen`` is the over-repeated-span coverage of the hypothesis.
+    With ``return_stats=True`` it also returns per-sample component values
+    (weighted CER, insertion/deletion ratios, loop penalty, length ratio) for
+    reward monitoring.
+    """
     if len(references) != len(raw_completions):
         raise ValueError("references and raw_completions must have the same length.")
     if not 0.0 <= cer_weight <= 1.0:
         raise ValueError("cer_weight must be in [0, 1].")
-    if reward_mode not in {"wer", "wer_cer", "cer"}:
-        raise ValueError("reward_mode must be one of: wer, wer_cer, cer.")
-    rewards = []
+    if reward_mode not in {"wer", "wer_cer", "cer", "weighted_cer_loop"}:
+        raise ValueError(
+            "reward_mode must be one of: wer, wer_cer, cer, weighted_cer_loop."
+        )
+    if insertion_weight < 0 or deletion_weight < 0 or loop_weight < 0:
+        raise ValueError("insertion/deletion/loop weights must be non-negative.")
+    if loop_min_ngram < 2 or loop_max_ngram < loop_min_ngram:
+        raise ValueError("loop n-gram range must satisfy 2 <= min <= max.")
+
+    rewards: List[float] = []
+    stats: Dict[str, List[float]] = {
+        "weighted_cer": [],
+        "ins_ratio": [],
+        "del_ratio": [],
+        "loop_pen": [],
+        "len_ratio": [],
+    }
     for reference, raw_completion in zip(references, raw_completions):
         try:
             _, hypothesis = parse_asr_output(raw_completion, user_language=None)
@@ -134,13 +170,133 @@ def asr_rewards(
             hypothesis = ""
         wer = word_error_rate(reference, hypothesis)
         cer = character_error_rate(reference, hypothesis)
-        if reward_mode == "cer":
+        if reward_mode == "weighted_cer_loop":
+            subs, dels, ins, n = cer_decomposition(reference, hypothesis)
+            if n:
+                weighted_cer = (
+                    subs + deletion_weight * dels + insertion_weight * ins
+                ) / n
+            else:
+                weighted_cer = 0.0 if not hypothesis else 1.0
+            loop_pen = loop_penalty_ratio(
+                hypothesis, reference, loop_min_ngram, loop_max_ngram
+            )
+            rewards.append(-(weighted_cer + loop_weight * loop_pen))
+            ref_chars = len(normalize_english(reference).replace(" ", ""))
+            hyp_chars = len(normalize_english(hypothesis).replace(" ", ""))
+            stats["weighted_cer"].append(weighted_cer)
+            stats["ins_ratio"].append(ins / n if n else 0.0)
+            stats["del_ratio"].append(dels / n if n else 0.0)
+            stats["loop_pen"].append(loop_pen)
+            stats["len_ratio"].append(
+                hyp_chars / ref_chars if ref_chars else float(hyp_chars > 0)
+            )
+        elif reward_mode == "cer":
             rewards.append(-cer)
         elif reward_mode == "wer":
             rewards.append(-wer)
         else:
             rewards.append(-(wer + cer_weight * cer))
-    return torch.tensor(rewards, dtype=torch.float32)
+    tensor = torch.tensor(rewards, dtype=torch.float32)
+    if return_stats:
+        return tensor, stats
+    return tensor
+
+
+def cer_decomposition(reference: str, hypothesis: str) -> Tuple[int, int, int, int]:
+    """(substitutions, deletions, insertions, ref_len) on eval-normalized chars.
+
+    Uses the shared evaluation normalization (numerals, hyphens, dictionary
+    compounds, ...) so the reward optimizes the same surface as the selection
+    metric, then drops spaces for a character-level alignment.
+    """
+    ref = normalize_english(reference).replace(" ", "")
+    hyp = normalize_english(hypothesis).replace(" ", "")
+    n, m = len(ref), len(hyp)
+    if n == 0:
+        return 0, 0, m, 0
+    if m == 0:
+        return 0, n, 0, n
+
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        row = dp[i]
+        prev = dp[i - 1]
+        row[0] = i
+        rc = ref[i - 1]
+        for j in range(1, m + 1):
+            cost = 0 if rc == hyp[j - 1] else 1
+            row[j] = min(prev[j - 1] + cost, prev[j] + 1, row[j - 1] + 1)
+
+    subs = dels = inss = 0
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i and j and dp[i][j] == dp[i - 1][j - 1] + (0 if ref[i - 1] == hyp[j - 1] else 1):
+            if ref[i - 1] != hyp[j - 1]:
+                subs += 1
+            i -= 1
+            j -= 1
+        elif i and dp[i][j] == dp[i - 1][j] + 1:
+            dels += 1
+            i -= 1
+        else:
+            inss += 1
+            j -= 1
+    return subs, dels, inss, n
+
+
+def _over_repeat_coverage(hyp: str, ref: str, min_ngram: int, max_ngram: int) -> float:
+    """Fraction of hypothesis chars inside over-repeated n-grams.
+
+    An n-gram is over-repeated when it occurs more often in the hypothesis
+    than in the reference, so legitimate repeated report vocabulary that the
+    reference also repeats is never penalized. Spans are counted once
+    (greedy longest first) so a long repeated tail is not double-counted
+    through its substrings.
+    """
+    hyp_len = len(hyp)
+    if hyp_len < min_ngram:
+        return 0.0
+
+    ref_counts: Dict[str, int] = {}
+    for n in range(min_ngram, min(max_ngram, len(ref)) + 1):
+        for i in range(len(ref) - n + 1):
+            gram = ref[i:i + n]
+            ref_counts[gram] = ref_counts.get(gram, 0) + 1
+    hyp_counts: Dict[str, int] = {}
+    for n in range(min_ngram, min(max_ngram, hyp_len) + 1):
+        for i in range(hyp_len - n + 1):
+            gram = hyp[i:i + n]
+            hyp_counts[gram] = hyp_counts.get(gram, 0) + 1
+
+    covered = 0
+    i = 0
+    while i + min_ngram <= hyp_len:
+        best = 0
+        for n in range(min_ngram, min(max_ngram, hyp_len - i) + 1):
+            gram = hyp[i:i + n]
+            if hyp_counts[gram] > ref_counts.get(gram, 0):
+                best = n
+        if best:
+            covered += best
+            i += best
+        else:
+            i += 1
+    return covered / hyp_len
+
+
+def loop_penalty_ratio(
+    hypothesis: str, reference: str, min_ngram: int = 4, max_ngram: int = 48
+) -> float:
+    """Cyclic-hallucination penalty: over-repeated span coverage of the hypothesis."""
+    return _over_repeat_coverage(
+        normalize_english(hypothesis).replace(" ", ""),
+        normalize_english(reference).replace(" ", ""),
+        min_ngram,
+        max_ngram,
+    )
 
 
 def group_advantages(rewards: torch.Tensor, num_generations: int) -> torch.Tensor:
@@ -436,15 +592,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta", type=float, default=0.01, help="Reference-KL coefficient.")
     parser.add_argument(
         "--reward_mode",
-        choices=("wer", "wer_cer", "cer"),
+        choices=("wer", "wer_cer", "cer", "weighted_cer_loop"),
         default="wer_cer",
-        help="Reward objective: -WER, -(WER + cer_weight*CER), or -CER.",
+        help="Reward objective: -WER, -(WER + cer_weight*CER), -CER, or the "
+        "hallucination-guarded weighted CER with loop penalty.",
     )
     parser.add_argument(
         "--cer_weight",
         type=float,
         default=0.0,
         help="Additional CER penalty weight; 0 uses WER only.",
+    )
+    parser.add_argument(
+        "--insertion_weight",
+        type=float,
+        default=1.5,
+        help="weighted_cer_loop: weight for inserted characters (hallucinations).",
+    )
+    parser.add_argument(
+        "--deletion_weight",
+        type=float,
+        default=1.0,
+        help="weighted_cer_loop: weight for deleted characters.",
+    )
+    parser.add_argument(
+        "--loop_weight",
+        type=float,
+        default=0.5,
+        help="weighted_cer_loop: weight for the over-repeated-span (loop) penalty.",
+    )
+    parser.add_argument(
+        "--loop_min_ngram",
+        type=int,
+        default=4,
+        help="weighted_cer_loop: minimum character n-gram length for loop detection.",
+    )
+    parser.add_argument(
+        "--loop_max_ngram",
+        type=int,
+        default=48,
+        help="weighted_cer_loop: maximum character n-gram length for loop detection.",
     )
     parser.add_argument("--epsilon", type=float, default=0.2, help="GRPO ratio clip range.")
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
@@ -482,6 +669,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--top_k must be non-negative.")
     if not 0.0 <= args.cer_weight <= 1.0:
         raise ValueError("--cer_weight must be in [0, 1].")
+    if args.insertion_weight < 0 or args.deletion_weight < 0 or args.loop_weight < 0:
+        raise ValueError("--insertion_weight/--deletion_weight/--loop_weight must be non-negative.")
+    if args.loop_min_ngram < 2 or args.loop_max_ngram < args.loop_min_ngram:
+        raise ValueError("--loop_min_ngram/--loop_max_ngram must satisfy 2 <= min <= max.")
 
 
 def main() -> None:
@@ -506,6 +697,9 @@ def main() -> None:
                 if args.reward_mode == "cer"
                 else "-WER"
                 if args.reward_mode == "wer"
+                else "-(wCER + %g*loop), wCER=(S + %g*D + %g*I)/N"
+                % (args.loop_weight, args.deletion_weight, args.insertion_weight)
+                if args.reward_mode == "weighted_cer_loop"
                 else "-(WER + %g*CER)" % args.cer_weight,
                 ",".join(frozen_parts) or "none",
                 ",".join(trainable_parts) or "none",
@@ -583,12 +777,19 @@ def main() -> None:
                 for row in rows
                 for _ in range(args.num_generations)
             ]
-            rewards = asr_rewards(
+            rewards, reward_stats = asr_rewards(
                 references,
                 rollout.raw_completions,
                 reward_mode=args.reward_mode,
-                cer_weight=args.cer_weight
-            ).to(device)
+                cer_weight=args.cer_weight,
+                insertion_weight=args.insertion_weight,
+                deletion_weight=args.deletion_weight,
+                loop_weight=args.loop_weight,
+                loop_min_ngram=args.loop_min_ngram,
+                loop_max_ngram=args.loop_max_ngram,
+                return_stats=args.reward_mode == "weighted_cer_loop",
+            )
+            rewards = rewards.to(device)
             advantages = group_advantages(rewards, args.num_generations)
 
             live_audio = (
@@ -629,10 +830,24 @@ def main() -> None:
                 average_kl = ((reference_logps - new_logps).detach() * mask).sum().item() / mask.sum().item()
                 grouped = rewards.view(-1, args.num_generations)
                 nondegenerate = (grouped.std(dim=1, unbiased=False) > 1e-6).float().mean().item()
-                print(
+                message = (
                     "[step %d] loss=%.6f reward=%.4f kl=%.5f len=%.1f nondegenerate=%.2f"
                     % (global_step, loss.item(), rewards.mean().item(), average_kl, average_length, nondegenerate)
                 )
+                if reward_stats is not None:
+                    loop_pens = reward_stats["loop_pen"]
+                    message += (
+                        " wcer=%.4f insR=%.4f delR=%.4f loopR=%.4f loop%%=%.2f lenR=%.2f"
+                        % (
+                            sum(reward_stats["weighted_cer"]) / len(reward_stats["weighted_cer"]),
+                            sum(reward_stats["ins_ratio"]) / len(reward_stats["ins_ratio"]),
+                            sum(reward_stats["del_ratio"]) / len(reward_stats["del_ratio"]),
+                            sum(loop_pens) / len(loop_pens),
+                            sum(p > 0 for p in loop_pens) / len(loop_pens),
+                            sum(reward_stats["len_ratio"]) / len(reward_stats["len_ratio"]),
+                        )
+                    )
+                print(message)
 
             if args.save_steps > 0 and global_step % args.save_steps == 0:
                 policy_model.eval()
