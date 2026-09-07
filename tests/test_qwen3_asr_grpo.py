@@ -150,3 +150,45 @@ def test_asr_rewards_legacy_modes_unchanged_by_new_kwargs():
         loop_weight=1.0,
     )
     assert torch.equal(legacy, with_kwargs)
+
+
+def test_repeat_audio_features_aligns_frames_per_audio():
+    """Regression: audio-trainable GRPO expands one prefix per distinct audio.
+
+    full_ids is repeat_interleave'd (audio0 x G rows, audio1 x G rows, ...),
+    so the expansion must slice one prefix row per audio via full_ids[::G]
+    and re-expand its frames onto exactly that audio's rows. A tile/strided
+    mismatch would pass the placeholder-count check but silently feed each
+    row another audio's features.
+    """
+    from finetuning.qwen3_asr_grpo import _merge_audio_embeddings, _repeat_audio_features
+
+    class _FakeThinker:
+        class config:
+            audio_token_id = 99
+
+        def get_input_embeddings(self):
+            return torch.nn.Embedding(100, 4)
+
+    tok = 99
+    # two audios: 3 and 2 feature frames, concatenated (5, D)
+    features = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    prefix_ids = torch.tensor(
+        [[1, tok, tok, tok, 7], [2, tok, tok, 8, 8]]
+    )
+    full_ids = prefix_ids.repeat_interleave(3, dim=0)
+
+    expanded = _repeat_audio_features(features, full_ids[::3], tok, 3)
+    assert expanded.shape == (15, 4)
+
+    embeds = _merge_audio_embeddings(_FakeThinker(), full_ids, expanded)
+
+    audio0_frames = features[:3]
+    audio1_frames = features[3:]
+    for r in range(3):
+        # every generation row of audio0 carries audio0's frame sequence
+        assert torch.equal(embeds[r, 1:4], audio0_frames)
+        # every generation row of audio1 carries audio1's frame sequence
+        assert torch.equal(embeds[3 + r, 1:3], audio1_frames)
+        # non-placeholder positions keep their token embeddings (unscattered)
+        assert not torch.equal(embeds[r, 1:2].squeeze(0), torch.zeros(4))

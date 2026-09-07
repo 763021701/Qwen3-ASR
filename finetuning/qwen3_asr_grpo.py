@@ -478,9 +478,14 @@ def completion_logps(
             input_features, feature_attention_mask=feature_attention_mask
         )
         prompt_width = rollout.full_ids.shape[1] - rollout.completion_ids.shape[1]
+        # ``rollout.full_ids`` is repeat_interleave'd per generation; take one
+        # prefix per distinct audio (every G-th row) so the placeholder counts
+        # match the single-batch recomputed audio features, then _repeat_audio_features
+        # expands them back to cover all G*B rows.
+        prefix_ids = rollout.full_ids[:: rollout.num_generations, :prompt_width]
         audio_features = _repeat_audio_features(
             audio_features,
-            rollout.full_ids[:, :prompt_width],
+            prefix_ids,
             thinker.config.audio_token_id,
             rollout.num_generations,
         )
