@@ -55,6 +55,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--context", type=str, default="")
     p.add_argument("--device_map", type=str, default="cuda:0")
     p.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=1.0,
+        help="Set on the model generation_config (1.0 = off).",
+    )
+    p.add_argument(
+        "--no_repeat_ngram_size",
+        type=int,
+        default=0,
+        help="Set on the model generation_config (0 = off).",
+    )
+    p.add_argument(
         "--output_predictions",
         type=str,
         required=True,
@@ -145,6 +157,21 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
     )
     print(f"Model loaded in {time.time() - t_load:.1f}s")
+
+    gen_targets = [model.model.generation_config]
+    thinker = getattr(model.model, "thinker", None)
+    if thinker is not None and getattr(thinker, "generation_config", None) is not None:
+        gen_targets.append(thinker.generation_config)
+    for gen_cfg in gen_targets:
+        if args.repetition_penalty != 1.0:
+            gen_cfg.repetition_penalty = args.repetition_penalty
+        if args.no_repeat_ngram_size:
+            gen_cfg.no_repeat_ngram_size = args.no_repeat_ngram_size
+    if args.repetition_penalty != 1.0 or args.no_repeat_ngram_size:
+        print(
+            f"[decode] repetition_penalty={args.repetition_penalty} "
+            f"no_repeat_ngram_size={args.no_repeat_ngram_size} (set on {len(gen_targets)} generation_configs)"
+        )
 
     # Resume: skip already-predicted audio paths
     completed = load_completed_keys(args.output_predictions)
