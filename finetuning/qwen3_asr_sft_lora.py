@@ -756,14 +756,19 @@ def main():
         print("[lora] scope=%s r=%d alpha=%d dropout=%s"
               % (args_cli.lora_scope, args_cli.lora_r, args_cli.lora_alpha, args_cli.lora_dropout))
 
-    raw_ds = load_dataset(
-        "json",
-        data_files={
-            "train": args_cli.train_file,
-            **({"validation": args_cli.eval_file} if args_cli.eval_file else {}),
-        },
-    )
-    ds = raw_ds.map(make_preprocess_fn_prefix_only(processor), num_proc=1)
+    # Load splits separately so manifests with different column sets (e.g.
+    # RAFT rows) don't hit the multi-split schema-unification CastError.
+    raw_ds = {
+        "train": load_dataset("json", data_files=str(args_cli.train_file), split="train")
+    }
+    if args_cli.eval_file:
+        raw_ds["validation"] = load_dataset(
+            "json", data_files=str(args_cli.eval_file), split="train"
+        )
+    ds = {
+        split: raw_split.map(make_preprocess_fn_prefix_only(processor), num_proc=1)
+        for split, raw_split in raw_ds.items()
+    }
 
     keep = {"prompt", "audio", "target", "prefix_text", "aug"}
     for split in ds.keys():

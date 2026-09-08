@@ -1099,17 +1099,24 @@ def main():
                 % (part, total, trainable)
             )
 
-    raw_ds = load_dataset(
-        "json",
-        data_files={
-            "train": args_cli.train_file,
-            **({"validation": args_cli.eval_file} if args_cli.eval_file else {}),
-        },
-    )
-    ds = raw_ds.map(
-        make_preprocess_fn_prefix_only(processor, curriculum=bool(args_cli.curriculum)),
-        num_proc=1,
-    )
+    # Load splits separately: a single multi-file load_dataset unifies schemas
+    # across splits and raises CastError on manifests with different column
+    # sets (e.g. RAFT rows carrying only audio/text/aug/noise_aug against
+    # prep-script rows that also carry sampling_source/duration_sec).
+    raw_ds = {
+        "train": load_dataset("json", data_files=str(args_cli.train_file), split="train")
+    }
+    if args_cli.eval_file:
+        raw_ds["validation"] = load_dataset(
+            "json", data_files=str(args_cli.eval_file), split="train"
+        )
+    ds = {
+        split: raw_split.map(
+            make_preprocess_fn_prefix_only(processor, curriculum=bool(args_cli.curriculum)),
+            num_proc=1,
+        )
+        for split, raw_split in raw_ds.items()
+    }
 
     keep = {"prompt", "audio", "target", "prefix_text", "aug", "noise_aug"}
     if args_cli.curriculum:
