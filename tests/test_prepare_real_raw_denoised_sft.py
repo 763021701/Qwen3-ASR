@@ -225,7 +225,11 @@ class AdditionalSyntheticTest(unittest.TestCase):
                 "cantonese_measure", csv_path, max_per_text=2, check_audio=False, seen_audio=set()
             )
             row = kept[0]
-            self.assertEqual(row["text"], "language None<asr_text>1 cm")
+            # The training target is the source's own `text` transcription:
+            # Cantonese-read numbers stay CJK to match the real-clip convention
+            # (the legacy `original` column is an Arabic rendering and must
+            # NOT override it).
+            self.assertEqual(row["text"], "language None<asr_text>一 c m")
             self.assertEqual(row["aug"], 1)
             self.assertEqual(row["noise_aug"], 1)
             self.assertEqual(row["sampling_source"], "cantonese_measure")

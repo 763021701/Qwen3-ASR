@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import json
 import random
@@ -60,6 +61,12 @@ def parse_args() -> argparse.Namespace:
         "--additional_synthetic_max_per_text distinct sources per normalized text.",
     )
     parser.add_argument("--additional_synthetic_max_per_text", type=int, default=2)
+    parser.add_argument(
+        "--min_duration_sec",
+        type=float,
+        default=0.0,
+        help="Drop TRAIN rows shorter than this many seconds (dev/test unaffected).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--check_audio", type=int, default=1, choices=(0, 1))
     return parser.parse_args()
@@ -340,7 +347,11 @@ def load_additional_synthetic_rows(
     rows = [
         {
             "audio": str(item["audio"]),
-            "text": f"{ASR_PREFIX}{item['original']}",
+            # Training target must be the source's own `text` transcription
+            # (e.g. CJK numerals for Cantonese-read numbers); `original` is a
+            # legacy Arabic-numeral rendering and would conflict with the
+            # CJK convention used by the real-clip targets.
+            "text": f"{ASR_PREFIX}{item['text']}",
             "aug": 1,
             "noise_aug": 1,
             "sampling_source": name,
@@ -538,6 +549,23 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
 
     random.Random(int(args.seed)).shuffle(train_rows)
 
+    min_duration_report = None
+    min_dur = float(getattr(args, "min_duration_sec", 0.0) or 0.0)
+    if min_dur > 0:
+        by_source = collections.Counter()
+        kept_rows = []
+        for row in train_rows:
+            if float(row["duration_sec"]) < min_dur:
+                by_source[row["sampling_source"]] += 1
+            else:
+                kept_rows.append(row)
+        min_duration_report = {
+            "threshold_sec": min_dur,
+            "dropped": len(train_rows) - len(kept_rows),
+            "dropped_by_source": dict(sorted(by_source.items())),
+        }
+        train_rows = kept_rows
+
     output_dir = Path(args.output_dir).resolve()
     train_out = Path(args.train_jsonl or output_dir / "train.jsonl")
     dev_out = Path(args.dev_jsonl or output_dir / "dev.jsonl")
@@ -576,6 +604,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         },
         "synthetic": synthetic_report,
         "additional_synthetic": additional_report,
+        "min_duration_sec": min_duration_report,
         "output": {
             "train": rows_stats(train_rows),
             "dev": rows_stats(dev_rows),
