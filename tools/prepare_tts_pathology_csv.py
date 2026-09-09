@@ -83,10 +83,15 @@ def main() -> None:
         if not voice:
             raise ValueError(f"row without speaker/variant: {item.get('id')}")
         text = transcript_body(item["text"])
+        raw_id = item.get("id", "")
+        try:
+            row_index = f"{int(raw_id):06d}"  # legacy corpus: numeric ids
+        except (TypeError, ValueError):
+            row_index = str(raw_id)  # v2 corpus: string ids like A_00215dc4...
         written.append(
             {
                 "source": voice,
-                "index": f"{int(item['id']):06d}",
+                "index": row_index,
                 "audio_path": audio_path,
                 "text": text,
                 "original": text,
