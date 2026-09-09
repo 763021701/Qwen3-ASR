@@ -40,60 +40,71 @@ from qwen_asr.inference.utils import parse_asr_output
 
 @dataclass(frozen=True)
 class MiningThresholds:
-    easy_mean_wer_max: float
-    easy_std_wer_max: float
-    recoverable_mean_wer_min: float
-    recoverable_best_wer_max: float
-    recoverable_std_wer_min: float
-    unstable_mean_wer_min: float
-    unstable_mean_wer_max: float
-    unstable_std_wer_min: float
-    wrong_best_wer_min: float
-    wrong_std_wer_max: float
-    catastrophic_wer_min: float
+    easy_mean_max: float
+    easy_std_max: float
+    capable_best_max: float
+    hard_std_min: float
+    suspect_worst_min: float
+    suspect_best_min: float
 
 
-def wer_statistics(wers: Sequence[float]) -> Dict[str, float]:
-    if not wers:
-        raise ValueError("Need at least one WER value.")
+def error_statistics(values: Sequence[float], label: str = "cer") -> Dict[str, float]:
+    if not values:
+        raise ValueError("Need at least one error-rate value.")
     return {
-        "mean_wer": statistics.fmean(wers),
-        "best_wer": min(wers),
-        "worst_wer": max(wers),
-        "std_wer": statistics.pstdev(wers),
+        f"mean_{label}": statistics.fmean(values),
+        f"best_{label}": min(values),
+        f"worst_{label}": max(values),
+        f"std_{label}": statistics.pstdev(values),
     }
 
 
-def classify_wers(wers: Sequence[float], thresholds: MiningThresholds) -> Tuple[str, Dict[str, float]]:
-    """Classify an audio by its within-group WER distribution.
+def wer_statistics(wers: Sequence[float]) -> Dict[str, float]:
+    """Backwards-compatible wrapper; classification now uses CER stats."""
+    return error_statistics(wers, label="wer")
 
-    Catastrophic is evaluated first so one unrelated hallucination is never
-    hidden by an otherwise recoverable group.
+
+def classify_error_rates(
+    cers: Sequence[float], thresholds: MiningThresholds, label: str = "cer"
+) -> Tuple[str, Dict[str, float]]:
+    """Classify an audio by its within-group error-rate distribution (4 classes).
+
+    Uses character-level CER: word-level WER systematically overstates
+    severity on segmentation-free text (Cantonese, specimen-label digit
+    strings), where a single character error marks a whole "word" wrong and
+    trivially crosses the catastrophic WER threshold — 79% of the round-1
+    catastrophic labels were such false alarms (user audio verification,
+    2026-09-08).
+
+    4-class design (2026-09-09, user-confirmed), one action per class:
+      easy    mean <= easy_mean_max and std <= easy_std_max
+              No within-group signal; excluded from GRPO (zero-variance group).
+      suspect best > capable_best_max and (worst >= suspect_worst_min or
+              best >= suspect_best_min)
+              Even the best rollout is badly wrong -> bad label/audio suspect
+              for human verification; never trained on.
+      hard    best <= capable_best_max and std >= hard_std_min
+              The model demonstrably solves the clip (best) AND the group
+              carries reward variance -> the GRPO training mass. Covers both
+              occasional full hallucinations ([0 x7, 3.0]) and the classic
+              reachable-hard profile.
+      weak    everything else (uniform-mediocre or unreachable); excluded.
     """
-    stats = wer_statistics(wers)
-    mean_wer = stats["mean_wer"]
-    best_wer = stats["best_wer"]
-    worst_wer = stats["worst_wer"]
-    std_wer = stats["std_wer"]
+    stats = error_statistics(cers, label=label)
+    mean = stats[f"mean_{label}"]
+    best = stats[f"best_{label}"]
+    worst = stats[f"worst_{label}"]
+    std = stats[f"std_{label}"]
 
-    if worst_wer >= thresholds.catastrophic_wer_min:
-        return "catastrophic_hallucination", stats
-    if (
-        mean_wer >= thresholds.recoverable_mean_wer_min
-        and best_wer <= thresholds.recoverable_best_wer_max
-        and std_wer >= thresholds.recoverable_std_wer_min
-    ):
-        return "recoverable", stats
-    if (
-        thresholds.unstable_mean_wer_min <= mean_wer <= thresholds.unstable_mean_wer_max
-        and std_wer >= thresholds.unstable_std_wer_min
-    ):
-        return "unstable", stats
-    if mean_wer <= thresholds.easy_mean_wer_max and std_wer <= thresholds.easy_std_wer_max:
+    if mean <= thresholds.easy_mean_max and std <= thresholds.easy_std_max:
         return "easy", stats
-    if best_wer >= thresholds.wrong_best_wer_min and std_wer <= thresholds.wrong_std_wer_max:
-        return "consistently_wrong", stats
-    return "mixed", stats
+    if best > thresholds.capable_best_max and (
+        worst >= thresholds.suspect_worst_min or best >= thresholds.suspect_best_min
+    ):
+        return "suspect", stats
+    if best <= thresholds.capable_best_max and std >= thresholds.hard_std_min:
+        return "hard", stats
+    return "weak", stats
 
 
 def category_weight(category: str, args: argparse.Namespace) -> int:
@@ -119,9 +130,8 @@ def oversample_records(
         for _ in range(weight):
             row = dict(source)
             row["grpo_category"] = category
-            row["grpo_mining_mean_wer"] = round(stats["mean_wer"], 6)
-            row["grpo_mining_best_wer"] = round(stats["best_wer"], 6)
-            row["grpo_mining_std_wer"] = round(stats["std_wer"], 6)
+            for key, value in stats.items():
+                row[f"grpo_mining_{key}"] = round(value, 6)
             sampled.append(row)
     return sampled
 
@@ -144,7 +154,16 @@ def _validate_output_paths(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Mine Qwen3-ASR data for GRPO from G-sample WER statistics.")
+    parser = argparse.ArgumentParser(description="Mine Qwen3-ASR data for GRPO from G-sample error-rate statistics.")
+    parser.add_argument(
+        "--classification_metric",
+        choices=("cer", "wer"),
+        default="cer",
+        help="Error metric used for category classification. Default cer: "
+        "word-level WER overstates severity on segmentation-free text "
+        "(Cantonese / specimen-label digit strings). Both WER and CER "
+        "statistics are always reported either way.",
+    )
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--input_jsonl", required=True, help="Source RL candidates with audio/text and optional prompt.")
     parser.add_argument("--output_report", required=True, help="Per-audio group rollout report JSONL.")
@@ -157,23 +176,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_k", type=int, default=50)
     parser.add_argument("--sr", type=int, default=16000)
     parser.add_argument("--max_samples", type=int, default=0)
-    parser.add_argument("--easy_mean_wer_max", type=float, default=0.15)
-    parser.add_argument("--easy_std_wer_max", type=float, default=0.05)
-    parser.add_argument("--recoverable_mean_wer_min", type=float, default=0.35)
-    parser.add_argument("--recoverable_best_wer_max", type=float, default=0.20)
-    parser.add_argument("--recoverable_std_wer_min", type=float, default=0.15)
-    parser.add_argument("--unstable_mean_wer_min", type=float, default=0.15)
-    parser.add_argument("--unstable_mean_wer_max", type=float, default=0.50)
-    parser.add_argument("--unstable_std_wer_min", type=float, default=0.12)
-    parser.add_argument("--wrong_best_wer_min", type=float, default=0.60)
-    parser.add_argument("--wrong_std_wer_max", type=float, default=0.10)
-    parser.add_argument("--catastrophic_wer_min", type=float, default=1.00)
-    parser.add_argument("--weight_easy", type=int, default=1)
-    parser.add_argument("--weight_recoverable", type=int, default=5)
-    parser.add_argument("--weight_unstable", type=int, default=5)
-    parser.add_argument("--weight_consistently_wrong", type=int, default=1)
-    parser.add_argument("--weight_catastrophic_hallucination", type=int, default=5)
-    parser.add_argument("--weight_mixed", type=int, default=1)
+    parser.add_argument("--easy_mean_max", type=float, default=0.15)
+    parser.add_argument("--easy_std_max", type=float, default=0.05)
+    parser.add_argument(
+        "--capable_best_max",
+        type=float,
+        default=0.30,
+        help="Best-of-group error at or below this means the model can produce a "
+        "near-correct transcript (hard); above it the clip is a bad-data suspect "
+        "when it also hallucinates or fails deterministically.",
+    )
+    parser.add_argument(
+        "--hard_std_min",
+        type=float,
+        default=0.05,
+        help="Within-group std at or above which the group carries GRPO reward variance.",
+    )
+    parser.add_argument("--suspect_worst_min", type=float, default=1.00)
+    parser.add_argument("--suspect_best_min", type=float, default=0.60)
+    parser.add_argument("--weight_easy", type=int, default=0)
+    parser.add_argument("--weight_hard", type=int, default=5)
+    parser.add_argument("--weight_suspect", type=int, default=0)
+    parser.add_argument("--weight_weak", type=int, default=0)
     parser.add_argument(
         "--dedupe_by_audio",
         type=int,
@@ -194,17 +218,12 @@ def parse_args() -> argparse.Namespace:
 
 def _thresholds_from_args(args: argparse.Namespace) -> MiningThresholds:
     return MiningThresholds(
-        easy_mean_wer_max=args.easy_mean_wer_max,
-        easy_std_wer_max=args.easy_std_wer_max,
-        recoverable_mean_wer_min=args.recoverable_mean_wer_min,
-        recoverable_best_wer_max=args.recoverable_best_wer_max,
-        recoverable_std_wer_min=args.recoverable_std_wer_min,
-        unstable_mean_wer_min=args.unstable_mean_wer_min,
-        unstable_mean_wer_max=args.unstable_mean_wer_max,
-        unstable_std_wer_min=args.unstable_std_wer_min,
-        wrong_best_wer_min=args.wrong_best_wer_min,
-        wrong_std_wer_max=args.wrong_std_wer_max,
-        catastrophic_wer_min=args.catastrophic_wer_min,
+        easy_mean_max=args.easy_mean_max,
+        easy_std_max=args.easy_std_max,
+        capable_best_max=args.capable_best_max,
+        hard_std_min=args.hard_std_min,
+        suspect_worst_min=args.suspect_worst_min,
+        suspect_best_min=args.suspect_best_min,
     )
 
 
@@ -221,14 +240,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--top_p must be in (0, 1].")
     if args.top_k < 0:
         raise ValueError("--top_k must be non-negative.")
-    for category in (
-        "easy",
-        "recoverable",
-        "unstable",
-        "consistently_wrong",
-        "catastrophic_hallucination",
-        "mixed",
-    ):
+    for category in ("easy", "hard", "suspect", "weak"):
         if category_weight(category, args) < 0:
             raise ValueError(f"weight for {category} must be non-negative.")
 
@@ -307,7 +319,7 @@ def main() -> None:
             "[dry-run] weights="
             + str({
                 category: category_weight(category, args)
-                for category in ("easy", "recoverable", "unstable", "consistently_wrong", "catastrophic_hallucination", "mixed")
+                for category in ("easy", "hard", "suspect", "weak")
             })
         )
         return
@@ -361,14 +373,22 @@ def main() -> None:
                 for row in rows
                 for _ in range(args.num_generations)
             ]
-            wers = (-asr_rewards(references, rollout.raw_completions)).tolist()
+            wers = (-asr_rewards(references, rollout.raw_completions, reward_mode="wer")).tolist()
+            cers = (-asr_rewards(references, rollout.raw_completions, reward_mode="cer")).tolist()
             batch_reports = []
             for row_index, (source_index, source) in enumerate(indexed_rows):
                 start = row_index * args.num_generations
                 end = start + args.num_generations
                 group_raw = rollout.raw_completions[start:end]
                 group_wers = wers[start:end]
-                category, stats = classify_wers(group_wers, thresholds)
+                group_cers = cers[start:end]
+                # Classification uses CER: WER overstates severity on
+                # segmentation-free text (Cantonese / digit strings).
+                classification_values = group_cers if args.classification_metric == "cer" else group_wers
+                category, stats = classify_error_rates(
+                    classification_values, thresholds, label=args.classification_metric
+                )
+                stats = {**wer_statistics(group_wers), **stats}
                 reference = extract_reference_text(str(source["text"]))
                 report = {
                     "index": source.get("index", source_index),
@@ -378,6 +398,7 @@ def main() -> None:
                     "category": category,
                     **{key: round(value, 6) for key, value in stats.items()},
                     "wers": [round(value, 6) for value in group_wers],
+                    "cers": [round(value, 6) for value in group_cers],
                     "hypotheses": [_clean_hypothesis(raw) for raw in group_raw],
                     "raw_completions": group_raw,
                 }

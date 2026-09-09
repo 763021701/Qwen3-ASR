@@ -44,7 +44,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mining_report", required=True)
     parser.add_argument("--output_jsonl", required=True)
-    parser.add_argument("--categories", default="unstable,recoverable")
+    parser.add_argument("--categories", default="hard")
     parser.add_argument("--max_cer", type=float, default=0.15)
     parser.add_argument("--raft_weight", type=int, default=3)
     parser.add_argument("--stabilizer_manifest", default="",
