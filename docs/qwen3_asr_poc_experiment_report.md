@@ -118,7 +118,7 @@
 - 医疗归一化函数提取为轻量共享模块 [`evaluation/english_medical/text_normalization.py`](../evaluation/english_medical/text_normalization.py)，数据采样、训练期 CER 和最终评测共用同一实现；`eval_english_medical_asr_jsonl.py` 保持原导入接口。
 - 训练脚本新增 `--wer_max_new_tokens`（显式传给 ASR wrapper，本实验 512）；每次训练期 CER 评测把原始及归一化预测落盘到 `generation_eval/step-*_predictions.jsonl`，用于追踪循环输出。
 - 本轮训练 step-450 的 dev CER 一度飙升到 `0.5864`，`generation_eval` 定位到单条样本产生 2,518 字符的重复循环（同一 20-gram 重复 302 次），该 checkpoint 未进入保留集；其余评测步无循环。
-- 按 WER 选出本轮最佳 checkpoint-250（与 checkpoint-600 同为 9.76%，CER 更低），其余 4 个 checkpoint 暂不删除。
+- 按 WER 选出本轮最佳 checkpoint-250（与 checkpoint-600 同为 9.76%，CER 更低）；2026-08-21 清理其余 5 个 checkpoint（200/225/575/600/753，其中 753 为未评测的最终 step），见 §8。
 
 #### Radiology 长音频 rollout 循环测试（2026-08-21）
 
@@ -211,6 +211,16 @@ GRPO 实现为 [`finetuning/qwen3_asr_grpo.py`](../finetuning/qwen3_asr_grpo.py)
 - 初始 SFT：`13.40%` WER，checkpoint-500，目录 `poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_3ep`。
 
 全量 mined GRPO 的辅助挖掘目录 `poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining` 一并保留；它不是独立 WER 实验。
+
+### 2026-08-21 checkpoint 清理
+
+对最近三次实验按上文评测结果做 checkpoint 级清理，只保留最佳点（共删除 13 个 checkpoint，约 149GB）：
+
+- 真实域 + LLM 合成 + 粤语号码/度量：保留 checkpoint-250（9.76% WER / 7.39% CER）；删除 200/225/575/600/753（753 为未评测的最终 step）。
+- 真实域 + LLM 合成（CER 选点）：保留 checkpoint-275（10.24% WER）；删除 150/200/350/425（200 已退化至 54.82%）。
+- 真实域 raw + denoised：保留 checkpoint-75（更新归一化重测 15.63%）与 checkpoint-125（旧归一化最佳 9.17%，两种口径最佳点不同，均保留）；删除 100/150/175/189（189 为未评测的最终 step）。
+
+各保留 checkpoint 的评测 summary 与 predictions 完整保留在对应 `eval/` 目录。
 
 ## 9. 后续建议
 

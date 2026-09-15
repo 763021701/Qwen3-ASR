@@ -29,4 +29,5 @@ outputs
 bakup/
 raw/
 .opencode/goals/
+*.orig
 *.jsonl
