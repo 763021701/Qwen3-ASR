@@ -8,7 +8,10 @@ aligner frozen); ``--freeze_modules`` controls freezing per part
 forward recomputes audio features through the live audio tower so those
 parameters receive gradients; rollout sampling always reuses one shared
 encoding per group. Optimized against a group-relative, reference WER/CER
-reward. The implementation follows the rollout -> group advantage -> clipped
+reward. Greedy reward baselines and linear temperature annealing are optional.
+The default policy loss uses sampling-temperature probabilities and exact raw
+conditional reference KL; legacy probability scoring remains available.
+The implementation follows the rollout -> group advantage -> clipped
 policy loss plus reference-KL structure used by minimind's GRPO trainer.
 """
 
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -28,6 +32,7 @@ import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import GenerationConfig
@@ -250,7 +255,7 @@ def cer_decomposition(reference: str, hypothesis: str) -> Tuple[int, int, int, i
 def _over_repeat_coverage(hyp: str, ref: str, min_ngram: int, max_ngram: int) -> float:
     """Fraction of hypothesis chars inside over-repeated n-grams.
 
-    An n-gram is over-repeated when it occurs more often in the hypothesis
+    An n-gram is over-repeated when it occurs at least twice and more often in the hypothesis
     than in the reference, so legitimate repeated report vocabulary that the
     reference also repeats is never penalized. Spans are counted once
     (greedy longest first) so a long repeated tail is not double-counted
@@ -277,7 +282,7 @@ def _over_repeat_coverage(hyp: str, ref: str, min_ngram: int, max_ngram: int) ->
         best = 0
         for n in range(min_ngram, min(max_ngram, hyp_len - i) + 1):
             gram = hyp[i:i + n]
-            if hyp_counts[gram] > ref_counts.get(gram, 0):
+            if hyp_counts[gram] >= 2 and hyp_counts[gram] > ref_counts.get(gram, 0):
                 best = n
         if best:
             covered += best
@@ -396,15 +401,19 @@ def rollout_groups(
     prefix_inputs: Dict[str, torch.Tensor],
     num_generations: int,
     generation_config: GenerationConfig,
+    *,
+    audio_features: torch.Tensor | None = None,
+    use_model_defaults: bool | None = None,
 ) -> RolloutBatch:
     """Encode each audio once, then sample G completions from the same prefix."""
     input_ids = prefix_inputs["input_ids"]
     attention_mask = prefix_inputs["attention_mask"]
     feature_attention_mask = prefix_inputs["feature_attention_mask"]
-    audio_features = thinker.get_audio_features(
-        prefix_inputs["input_features"],
-        feature_attention_mask=feature_attention_mask,
-    )
+    if audio_features is None:
+        audio_features = thinker.get_audio_features(
+            prefix_inputs["input_features"],
+            feature_attention_mask=feature_attention_mask,
+        )
     prefix_embeds = _merge_audio_embeddings(thinker, input_ids, audio_features)
 
     repeated_ids = input_ids.repeat_interleave(num_generations, dim=0)
@@ -422,6 +431,7 @@ def rollout_groups(
 
     was_training = thinker.training
     thinker.eval()
+    generation_kwargs = {} if use_model_defaults is None else {"use_model_defaults": use_model_defaults}
     generated = thinker.generate(
         input_ids=repeated_ids,
         inputs_embeds=repeated_embeds,
@@ -429,6 +439,7 @@ def rollout_groups(
         input_features=None,
         feature_attention_mask=repeated_feature_attention,
         generation_config=generation_config,
+        **generation_kwargs,
     )
     if was_training:
         thinker.train()
@@ -458,12 +469,12 @@ def rollout_groups(
     )
 
 
-def completion_logps(
+def _completion_logits(
     thinker: Any,
     rollout: RolloutBatch,
     live_audio: Tuple[torch.Tensor, torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Compute raw-model log p(completion token | prompt, audio evidence).
+    """Return logits aligned with completion targets.
 
     With ``live_audio=(input_features, feature_attention_mask)`` the audio
     features are recomputed through the (possibly trainable) audio tower so
@@ -498,13 +509,103 @@ def completion_logps(
         attention_mask=rollout.full_attention_mask,
         input_features=None,
         feature_attention_mask=rollout.repeated_feature_attention_mask,
+        use_cache=False,
     )
-    next_token_logps = F.log_softmax(outputs.logits[:, :-1, :].float(), dim=-1)
-    selected = next_token_logps.gather(
-        2, rollout.full_ids[:, 1:].unsqueeze(-1)
-    ).squeeze(-1)
     prompt_width = rollout.full_ids.shape[1] - rollout.completion_ids.shape[1]
-    return selected[:, prompt_width - 1 : prompt_width - 1 + rollout.completion_ids.shape[1]]
+    return outputs.logits[:, prompt_width - 1:-1, :]
+
+
+def _token_scores(logits, token_ids, temperature=1.0, reference_logits=None):
+    """Selected logps and exact raw KL, checkpointed in 32-position chunks.
+
+    Recompute FP32 vocabulary intermediates during backward instead of retaining
+    them for every chunk. Reference logits never receive gradients.
+    """
+    def score_chunk(values, ids, ref):
+        raw = F.log_softmax(values.float(), dim=-1)
+        scaled = raw if temperature == 1.0 else F.log_softmax(values.float() / temperature, dim=-1)
+        selected = scaled.gather(-1, ids.unsqueeze(-1)).squeeze(-1)
+        raw_selected = raw.gather(-1, ids.unsqueeze(-1)).squeeze(-1)
+        kl = torch.zeros_like(selected)
+        if ref is not None:
+            ref_logps = F.log_softmax(ref.detach().float(), dim=-1)
+            kl = (raw.exp() * (raw - ref_logps)).sum(-1)
+        return selected, raw_selected, kl
+
+    chunks = []
+    for start in range(0, token_ids.shape[1], 32):
+        values = logits[:, start:start + 32]
+        ids = token_ids[:, start:start + 32]
+        ref = None if reference_logits is None else reference_logits[:, start:start + 32].detach()
+        if torch.is_grad_enabled() and values.requires_grad:
+            chunks.append(checkpoint(score_chunk, values, ids, ref, use_reentrant=False))
+        else:
+            chunks.append(score_chunk(values, ids, ref))
+    return tuple(torch.cat(items, dim=1) for items in zip(*chunks))
+
+
+def completion_logps(thinker, rollout, live_audio=None) -> torch.Tensor:
+    """Compatibility API: raw-model selected completion log probabilities."""
+    logits = _completion_logits(thinker, rollout, live_audio)
+    return _token_scores(logits, rollout.completion_ids)[0]
+
+
+def greedy_advantages(rewards, greedy_rewards, num_generations):
+    if (rewards.ndim != 1 or greedy_rewards.ndim != 1
+            or num_generations < 1 or rewards.numel() != greedy_rewards.numel() * num_generations):
+        raise ValueError("Expected one greedy reward per group of sampled rewards.")
+    return (rewards - greedy_rewards.repeat_interleave(num_generations)).detach()
+
+
+def temperature_at_step(args, optimizer_step):
+    if args.temperature_schedule == "constant":
+        return args.temperature
+    progress = min(optimizer_step / args.temperature_anneal_steps, 1.0)
+    return args.temperature + (args.temperature_end - args.temperature) * progress
+
+
+def _reward_batch(args, references, completions):
+    with_stats = args.reward_mode == "weighted_cer_loop"
+    result = asr_rewards(
+        references, completions, reward_mode=args.reward_mode,
+        cer_weight=args.cer_weight, insertion_weight=args.insertion_weight,
+        deletion_weight=args.deletion_weight, loop_weight=args.loop_weight,
+        loop_min_ngram=args.loop_min_ngram, loop_max_ngram=args.loop_max_ngram,
+        return_stats=with_stats,
+    )
+    rewards, stats = result if with_stats else (result, None)
+    return rewards.detach(), stats
+
+
+def _optimizer_update(optimizer, parameters, accumulated_batches, max_grad_norm):
+    # Backward accumulates unscaled batch means; average by the actual window.
+    for parameter in parameters:
+        if parameter.grad is not None:
+            parameter.grad.div_(accumulated_batches)
+    torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+
+def _check_reference_compatibility(policy, reference):
+    if policy.processor.tokenizer.get_vocab() != reference.processor.tokenizer.get_vocab():
+        raise ValueError("Reference and policy tokenizer vocabularies must match.")
+    if policy.processor.tokenizer.special_tokens_map != reference.processor.tokenizer.special_tokens_map:
+        raise ValueError("Reference and policy special tokens must match.")
+    if policy.processor.feature_extractor.to_dict() != reference.processor.feature_extractor.to_dict():
+        raise ValueError("Reference and policy audio preprocessing must match.")
+    if policy.processor.chat_template != reference.processor.chat_template:
+        raise ValueError("Reference and policy chat templates must match.")
+    for name in ("audio_token_id", "audio_start_token_id", "audio_end_token_id", "vocab_size"):
+        if getattr(policy.model.thinker.config, name, None) != getattr(reference.model.thinker.config, name, None):
+            raise ValueError(f"Reference and policy {name} must match.")
+
+
+def _parsed_transcript(raw):
+    try:
+        return parse_asr_output(raw, user_language=None)[1].strip()
+    except Exception:
+        return ""
 
 
 class JsonlDataset(Dataset):
@@ -563,6 +664,8 @@ def _save_checkpoint(
     output_dir: str,
     global_step: int,
     epoch: int,
+    *,
+    training_state: Dict[str, Any] | None = None,
 ) -> str:
     checkpoint_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -572,7 +675,8 @@ def _save_checkpoint(
     model.save_pretrained(checkpoint_dir, safe_serialization=True)
     processor.save_pretrained(checkpoint_dir)
     torch.save(
-        {"optimizer": optimizer.state_dict(), "global_step": global_step, "epoch": epoch},
+        {"optimizer": optimizer.state_dict(), "global_step": global_step, "epoch": epoch,
+         **(training_state or {})},
         os.path.join(checkpoint_dir, "grpo_trainer_state.pt"),
     )
     return checkpoint_dir
@@ -592,8 +696,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad_acc", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--top_k", type=int, default=50)
+    parser.add_argument("--advantage_mode", choices=("group", "greedy"), default="group")
+    parser.add_argument("--temperature_schedule", choices=("constant", "linear"), default="constant")
+    parser.add_argument("--temperature_end", type=float, default=0.1)
+    parser.add_argument("--temperature_anneal_steps", type=int, default=0,
+                        help="Optimizer updates before reaching terminal temperature.")
+    parser.add_argument("--policy_probability_mode", choices=("temperature", "legacy"), default="temperature")
+    parser.add_argument("--top_p", type=float, default=None)
+    parser.add_argument("--top_k", type=int, default=None)
     parser.add_argument("--beta", type=float, default=0.01, help="Reference-KL coefficient.")
     parser.add_argument(
         "--reward_mode",
@@ -660,14 +770,34 @@ def parse_args() -> argparse.Namespace:
 def _validate_args(args: argparse.Namespace) -> None:
     if args.batch_size < 1:
         raise ValueError("--batch_size must be positive.")
-    if args.num_generations < 2:
-        raise ValueError("--num_generations must be at least 2 for group-relative rewards.")
+    minimum = 2 if args.advantage_mode == "group" else 1
+    if args.num_generations < minimum:
+        raise ValueError(f"--num_generations must be at least {minimum} for {args.advantage_mode}.")
     if args.grad_acc < 1:
         raise ValueError("--grad_acc must be positive.")
     if args.max_new_tokens < 1:
         raise ValueError("--max_new_tokens must be positive.")
-    if args.temperature <= 0:
+    if not math.isfinite(args.temperature) or args.temperature <= 0:
         raise ValueError("--temperature must be greater than zero when sampling.")
+    if args.epochs < 1 or args.log_steps < 1:
+        raise ValueError("--epochs and --log_steps must be positive.")
+    if not math.isfinite(args.beta) or args.beta < 0 or not 0 < args.epsilon < 1:
+        raise ValueError("Require finite beta >= 0 and 0 < epsilon < 1.")
+    if set(_resolve_frozen_parts(args)) == set(PARTS):
+        raise ValueError("At least one module must be trainable.")
+    if not math.isfinite(args.temperature_end) or args.temperature_end <= 0:
+        raise ValueError("--temperature_end must be finite and positive.")
+    if args.temperature_anneal_steps < 0:
+        raise ValueError("--temperature_anneal_steps must be non-negative.")
+    if args.temperature_schedule == "linear" and (
+        args.temperature_anneal_steps < 1 or args.temperature_end > args.temperature
+    ):
+        raise ValueError("Linear annealing requires positive steps and end <= start.")
+    consistent = args.policy_probability_mode == "temperature"
+    args.top_p = (1.0 if consistent else 0.95) if args.top_p is None else args.top_p
+    args.top_k = (0 if consistent else 50) if args.top_k is None else args.top_k
+    if consistent and (args.top_p != 1.0 or args.top_k != 0):
+        raise ValueError("Temperature probability mode requires --top_p 1 --top_k 0.")
     if not 0 < args.top_p <= 1:
         raise ValueError("--top_p must be in (0, 1].")
     if args.top_k < 0:
@@ -682,6 +812,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    requested_args = vars(args).copy()
     _validate_args(args)
     seed_everything(args.seed)
     dataset = JsonlDataset(args.train_file, max_samples=args.max_samples)
@@ -733,12 +864,14 @@ def main() -> None:
 
     print(f"[load] reference={reference_path}")
     reference_wrapper = Qwen3ASRModel.from_pretrained(reference_path, dtype=dtype, device_map=None)
+    _check_reference_compatibility(policy_wrapper, reference_wrapper)
     reference_model = reference_wrapper.model.to(device).eval()
     reference_model.requires_grad_(False)
     reference_model.thinker.audio_tower.eval()
 
+    parameters = [param for param in policy_model.parameters() if param.requires_grad]
     optimizer = AdamW(
-        [param for param in policy_model.parameters() if param.requires_grad],
+        parameters,
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
@@ -761,84 +894,152 @@ def main() -> None:
         eos_token_id=eos_token_ids,
         pad_token_id=policy_model.generation_config.pad_token_id or eos_token_ids[-1],
         return_dict_in_generate=False,
+        num_beams=1, repetition_penalty=1.0, no_repeat_ngram_size=0,
+        min_length=0, min_new_tokens=None, forced_bos_token_id=None,
+        forced_eos_token_id=None, suppress_tokens=None, begin_suppress_tokens=None,
+        renormalize_logits=False,
     )
+    greedy_config = GenerationConfig(
+        do_sample=False, num_beams=1, max_new_tokens=args.max_new_tokens,
+        eos_token_id=eos_token_ids, pad_token_id=generation_config.pad_token_id,
+        return_dict_in_generate=False, repetition_penalty=1.0, no_repeat_ngram_size=0,
+        min_length=0, min_new_tokens=None, forced_bos_token_id=None,
+        forced_eos_token_id=None, suppress_tokens=None, begin_suppress_tokens=None,
+    )
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "run_config.json"), "w", encoding="utf-8") as handle:
+        json.dump({"requested": requested_args, "resolved": vars(args),
+                   "temperature_step_unit": "optimizer_update",
+                   "global_step_unit": "rollout_batch"}, handle, indent=2)
+    consistent = args.policy_probability_mode == "temperature"
+    print(f"[objective] advantage={args.advantage_mode} probability={args.policy_probability_mode} "
+          f"kl={'exact_raw_reverse' if consistent else 'sampled_legacy_regularizer'} "
+          f"schedule={args.temperature_schedule} start={args.temperature} "
+          f"end={args.temperature_end} anneal_updates={args.temperature_anneal_steps}")
 
     global_step = 0
+    optimizer_step = 0
+    accumulated_batches = 0
+    save_pending = False
     optimizer.zero_grad(set_to_none=True)
+
+    def save(epoch):
+        state = {
+            "optimizer_step": optimizer_step,
+            "temperature": temperature_at_step(args, optimizer_step),
+            "temperature_schedule": args.temperature_schedule,
+            "temperature_start": args.temperature,
+            "temperature_end": args.temperature_end,
+            "temperature_anneal_steps": args.temperature_anneal_steps,
+        }
+        return _save_checkpoint(policy_model, processor, optimizer, args.output_dir,
+                                global_step, epoch, training_state=state)
+
     should_stop = False
     for epoch in range(args.epochs):
         for rows in loader:
             policy_model.eval()
             prefix_inputs = _prepare_prefix_inputs(rows, processor, device, dtype, args.sr)
+            temperature = temperature_at_step(args, optimizer_step)
+            generation_config.temperature = temperature
+            with torch.no_grad():
+                audio_features = policy_model.thinker.get_audio_features(
+                    prefix_inputs["input_features"],
+                    feature_attention_mask=prefix_inputs["feature_attention_mask"],
+                )
             rollout = rollout_groups(
-                policy_model.thinker,
-                processor,
-                prefix_inputs,
-                args.num_generations,
-                generation_config,
+                policy_model.thinker, processor, prefix_inputs, args.num_generations,
+                generation_config, audio_features=audio_features, use_model_defaults=False,
             )
-            references = [
-                extract_reference_text(str(row["text"]))
-                for row in rows
-                for _ in range(args.num_generations)
-            ]
-            rewards, reward_stats = asr_rewards(
-                references,
-                rollout.raw_completions,
-                reward_mode=args.reward_mode,
-                cer_weight=args.cer_weight,
-                insertion_weight=args.insertion_weight,
-                deletion_weight=args.deletion_weight,
-                loop_weight=args.loop_weight,
-                loop_min_ngram=args.loop_min_ngram,
-                loop_max_ngram=args.loop_max_ngram,
-                return_stats=args.reward_mode == "weighted_cer_loop",
-            )
+            references = [extract_reference_text(str(row["text"])) for row in rows]
+            repeated_references = [text for text in references for _ in range(args.num_generations)]
+            rewards, reward_stats = _reward_batch(args, repeated_references, rollout.raw_completions)
             rewards = rewards.to(device)
-            advantages = group_advantages(rewards, args.num_generations)
+            greedy_rewards = None
+            if args.advantage_mode == "greedy":
+                greedy = rollout_groups(
+                    policy_model.thinker, processor, prefix_inputs, 1, greedy_config,
+                    audio_features=audio_features, use_model_defaults=False,
+                )
+                greedy_rewards, _ = _reward_batch(args, references, greedy.raw_completions)
+                greedy_rewards = greedy_rewards.to(device)
+                advantages = greedy_advantages(rewards, greedy_rewards, args.num_generations)
+                greedy_texts = [_parsed_transcript(raw) for raw in greedy.raw_completions]
+                same_text = sum(
+                    _parsed_transcript(raw) == greedy_texts[i // args.num_generations]
+                    for i, raw in enumerate(rollout.raw_completions)
+                ) / len(rollout.raw_completions)
+                del greedy
+            else:
+                advantages = group_advantages(rewards, args.num_generations).detach()
 
-            live_audio = (
-                (prefix_inputs["input_features"], prefix_inputs["feature_attention_mask"])
-                if audio_trainable else None
+            raw_audio = (prefix_inputs["input_features"], prefix_inputs["feature_attention_mask"])
+            live_audio = raw_audio if audio_trainable else None
+            score_temperature = temperature if consistent else 1.0
+            with torch.no_grad():
+                old_logits = _completion_logits(policy_model.thinker, rollout, live_audio)
+                old_logps = _token_scores(old_logits, rollout.completion_ids, score_temperature)[0]
+                del old_logits
+                # Always encode with the fixed reference, including when policy audio is frozen.
+                reference_logits = _completion_logits(reference_model.thinker, rollout, raw_audio)
+                reference_logps = _token_scores(reference_logits, rollout.completion_ids)[0]
+            # eval() disables dropout, not autograd; trainable audio still gets gradients.
+            new_logits = _completion_logits(policy_model.thinker, rollout, live_audio)
+            new_logps, raw_new_logps, exact_kl = _token_scores(
+                new_logits, rollout.completion_ids, score_temperature,
+                reference_logits if consistent else None,
             )
-            with torch.inference_mode():
-                old_logps = completion_logps(policy_model.thinker, rollout, live_audio).detach()
-                reference_logps = completion_logps(reference_model.thinker, rollout).detach()
-
-            policy_model.train()
-            if not audio_trainable:
-                policy_model.thinker.audio_tower.eval()
-            new_logps = completion_logps(policy_model.thinker, rollout, live_audio)
             mask = rollout.completion_mask.to(dtype=new_logps.dtype)
             ratio = torch.exp(new_logps - old_logps)
             unclipped = ratio * advantages.unsqueeze(1)
             clipped = torch.clamp(ratio, 1 - args.epsilon, 1 + args.epsilon) * advantages.unsqueeze(1)
             policy_term = -torch.minimum(unclipped, clipped)
-            kl_delta = reference_logps - new_logps
-            kl_term = torch.exp(kl_delta) - kl_delta - 1
+            kl_delta = reference_logps - raw_new_logps
+            kl_term = exact_kl if consistent else torch.exp(kl_delta) - kl_delta - 1
             per_token_loss = policy_term + args.beta * kl_term
             sequence_loss = (per_token_loss * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
             loss = sequence_loss.mean()
-            (loss / args.grad_acc).backward()
+            loss.backward()
 
             global_step += 1
-            if global_step % args.grad_acc == 0:
-                torch.nn.utils.clip_grad_norm_(
-                    [param for param in policy_model.parameters() if param.requires_grad],
-                    args.max_grad_norm,
-                )
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+            accumulated_batches += 1
+            if args.save_steps > 0 and global_step % args.save_steps == 0:
+                save_pending = True
+            if accumulated_batches == args.grad_acc:
+                _optimizer_update(optimizer, parameters, accumulated_batches, args.max_grad_norm)
+                accumulated_batches = 0
+                optimizer_step += 1
+                if save_pending:
+                    print(f"[save] {save(epoch)}")
+                    save_pending = False
 
             if global_step % args.log_steps == 0:
                 average_length = rollout.completion_mask.sum(dim=1).float().mean().item()
-                average_kl = ((reference_logps - new_logps).detach() * mask).sum().item() / mask.sum().item()
+                average_kl = ((kl_term.detach() * mask).sum(1) / mask.sum(1).clamp(min=1)).mean().item()
+                logp_gap = (kl_delta.detach() * mask).sum().item() / mask.sum().item()
                 grouped = rewards.view(-1, args.num_generations)
                 nondegenerate = (grouped.std(dim=1, unbiased=False) > 1e-6).float().mean().item()
                 message = (
                     "[step %d] loss=%.6f reward=%.4f kl=%.5f len=%.1f nondegenerate=%.2f"
                     % (global_step, loss.item(), rewards.mean().item(), average_kl, average_length, nondegenerate)
                 )
+                clip_fraction = (((ratio.detach() - 1).abs() > args.epsilon) * mask).sum() / mask.sum()
+                message += (
+                    f" optimizer_step={optimizer_step} temperature={temperature:.4f}"
+                    f" reward_std={grouped.std(dim=1, unbiased=False).mean().item():.4f}"
+                    f" advantage_abs_mean={advantages.abs().mean().item():.4f}"
+                    f" advantage_abs_max={advantages.abs().max().item():.4f}"
+                    f" clip_fraction={clip_fraction.item():.4f} logp_gap={logp_gap:.5f}"
+                )
+                if greedy_rewards is not None:
+                    message += (
+                        f" greedy_reward={greedy_rewards.mean().item():.4f}"
+                        f" reward_delta={advantages.mean().item():.4f}"
+                        f" better={(advantages > 1e-6).float().mean().item():.4f}"
+                        f" equal={(advantages.abs() <= 1e-6).float().mean().item():.4f}"
+                        f" worse={(advantages < -1e-6).float().mean().item():.4f}"
+                        f" same_text={same_text:.4f}"
+                    )
                 if reward_stats is not None:
                     loop_pens = reward_stats["loop_pen"]
                     message += (
@@ -854,26 +1055,20 @@ def main() -> None:
                     )
                 print(message)
 
-            if args.save_steps > 0 and global_step % args.save_steps == 0:
-                policy_model.eval()
-                path = _save_checkpoint(policy_model, processor, optimizer, args.output_dir, global_step, epoch)
-                print(f"[save] {path}")
-
-            del prefix_inputs, rollout, old_logps, reference_logps, new_logps, loss
+            del prefix_inputs, audio_features, raw_audio, live_audio, rollout
+            del old_logps, reference_logps, reference_logits, new_logits, new_logps, raw_new_logps
+            del exact_kl, kl_term, kl_delta, ratio, unclipped, clipped, policy_term
+            del per_token_loss, sequence_loss, loss
             if args.max_steps > 0 and global_step >= args.max_steps:
                 should_stop = True
                 break
         if should_stop:
             break
 
-    if global_step % args.grad_acc:
-        torch.nn.utils.clip_grad_norm_(
-            [param for param in policy_model.parameters() if param.requires_grad], args.max_grad_norm
-        )
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-    policy_model.eval()
-    final_path = _save_checkpoint(policy_model, processor, optimizer, args.output_dir, global_step, epoch)
+    if accumulated_batches:
+        _optimizer_update(optimizer, parameters, accumulated_batches, args.max_grad_norm)
+        optimizer_step += 1
+    final_path = save(epoch)
     print(f"[done] final_checkpoint={final_path}")
 
 
