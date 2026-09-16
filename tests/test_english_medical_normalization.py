@@ -16,6 +16,8 @@ class EnglishMedicalNormalizationTest(unittest.TestCase):
     def test_english_number_words_match_arabic(self):
         self.assertEqual(normalize_english("two blocks"), normalize_english("2 blocks"))
         self.assertEqual(normalize_english("three paraffin"), normalize_english("3 paraffin"))
+        self.assertEqual(normalize_english("one block"), "1 block")
+        self.assertEqual(normalize_english("1 block"), "1 block")
 
     def test_cantonese_two_matches_arabic(self):
         self.assertEqual(normalize_english("兩 cm"), normalize_english("2 cm"))
@@ -24,6 +26,15 @@ class EnglishMedicalNormalizationTest(unittest.TestCase):
     def test_spaced_units_and_acronyms_match(self):
         self.assertEqual(normalize_english("5 m m x 5 c m"), normalize_english("5 mm x 5 cm"))
         self.assertEqual(normalize_english("V A B"), normalize_english("VAB"))
+
+    def test_spaced_sn_labels_stay_separate_arabic_numbers(self):
+        hyp = "S N 一, S N 二 and non S N. S N 一"
+        ref = "'SN 1', 'SN 2' and 'non-SN'. SN 1"
+        expected = "sn 1 sn 2 and non sn sn 1"
+        self.assertEqual(normalize_english(hyp), expected)
+        self.assertEqual(normalize_english(ref), expected)
+        self.assertNotIn("ones", normalize_english(hyp))
+        self.assertNotIn("snsn", normalize_english(hyp))
 
     def test_alphanumeric_specimen_ids_match(self):
         expected = normalize_english("26SS11731")
@@ -86,6 +97,59 @@ class EnglishMedicalNormalizationTest(unittest.TestCase):
             "block a and f to h 係總數",
         )
 
+    def test_liang_variant_matches_arabic_two(self):
+        self.assertEqual(normalize_english("倆個 blocks"), normalize_english("2 blocks"))
+        self.assertEqual(normalize_english("倆 cm"), normalize_english("2 cm"))
+
+    def test_nian_prefix_matches_arabic_twenty(self):
+        self.assertEqual(normalize_english("廿八 cm"), normalize_english("28 cm"))
+        self.assertEqual(normalize_english("廿"), normalize_english("20"))
+
+    def test_long_spelled_letters_split_into_words(self):
+        self.assertEqual(
+            normalize_english("M A R K E L Y M A R K E D L Y"),
+            "markely markedly",
+        )
+
+    def test_block_ranges_do_not_merge_single_letters(self):
+        self.assertEqual(normalize_english("A to D A to D"), "a to d a to d")
+        self.assertEqual(normalize_english("Blocks C D"), "blocks c d")
+
+    def test_spaced_antero_posteriorly_matches_closed_form(self):
+        self.assertEqual(
+            normalize_english("antero posteriorly"),
+            normalize_english("anteroposteriorly"),
+        )
+        self.assertEqual(
+            normalize_english("1.8 cm antero posteriorly"),
+            normalize_english("1.8 cm anteroposteriorly"),
+        )
+
+    def test_oclock_is_not_merged_with_hour_number(self):
+        self.assertEqual(normalize_english("3 to 9 o'clock"), "3 to 9 oclock")
+        self.assertEqual(normalize_english("12 o'clock"), "12 oclock")
+        self.assertEqual(
+            normalize_english("from 3 to 9 o'clock"),
+            normalize_english("from 3 to 9 o clock"),
+        )
+
+    def test_repeated_two_does_not_become_twenty_two(self):
+        self.assertEqual(
+            normalize_english("two, two collapsed"),
+            normalize_english("2 2 collapsed"),
+        )
+
+    def test_level_roman_numerals_match_arabic(self):
+        self.assertEqual(normalize_english("level I lymph nodes"), "level 1 lymph nodes")
+        self.assertEqual(normalize_english("level II lymph nodes"), "level 2 lymph nodes")
+        self.assertEqual(
+            normalize_english("level I lymph nodes"),
+            normalize_english("level 1 lymph nodes"),
+        )
+        self.assertEqual(
+            normalize_english("level II lymph nodes"),
+            normalize_english("level 2 lymph nodes"),
+        )
 
 
 if __name__ == "__main__":
