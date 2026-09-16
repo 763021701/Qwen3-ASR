@@ -19,15 +19,22 @@ imperfect cuts harmless:
   5. Fallback: if the detected language is not alignable (or alignment
      fails), re-transcribe the exact zone without padding.
 
+Default: zone=30s, exact-zone transcription (--no_trim). Use --trim for the
+padded-window + aligner path. Zone ASR and aligner calls are batched.
+
 Usage:
     python long_inference.py audio.wav --model 0.6B
-    python long_inference.py audio.wav --model 1.7B --trusted_zone_sec 35 --pad_sec 5
     python long_inference.py audio.wav --model /path/to/checkpoint
+    python long_inference.py audio.wav --trim --trusted_zone_sec 35 --pad_sec 5
     python long_inference.py audio.wav --split_policy longest_zone
 """
 
+from __future__ import annotations
+
 import argparse
 import os
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
@@ -38,6 +45,27 @@ from qwen_asr import Qwen3ASRModel, Qwen3ForcedAligner
 from qwen_asr.inference.utils import SAMPLE_RATE
 
 FSMN_VAD_MODEL = "fsmn-vad"
+
+# Used when the ASR output carries no language tag (e.g. fine-tuned checkpoints):
+# the aligner's language arg only selects a tokenizer (no-op for non-ja/ko text),
+# so a default label keeps the padded-trim path alive instead of falling back.
+DEFAULT_ALIGN_LANGUAGE = "English"
+
+
+@dataclass
+class ZoneSpec:
+    zs: int
+    ze: int
+    wa: int
+    wb: int
+
+
+@dataclass
+class ZoneOutcome:
+    text: str
+    note: str
+    language: Optional[str]
+    spec: ZoneSpec
 
 
 def load_wav_16k(path: str) -> np.ndarray:
@@ -127,13 +155,21 @@ def split_at_silence(total: int, silences, max_sec: float, min_sec: float,
     return list(zip(bounds[:-1], bounds[1:]))
 
 
-def _align_char_spans(transcript: str, items, is_kept):
-    """Map each aligner item to its (start, end) char offsets in the transcript.
+def _build_zone_specs(zones: List[Tuple[int, int]], total: int, pad_sec: float) -> List[ZoneSpec]:
+    pad_n = int(pad_sec * SAMPLE_RATE)
+    return [
+        ZoneSpec(
+            zs=zs,
+            ze=ze,
+            wa=max(0, int(zs - pad_n)),
+            wb=min(total, int(ze + pad_n)),
+        )
+        for zs, ze in zones
+    ]
 
-    Aligner items concatenate (in order) to a subsequence of the transcript's
-    kept chars (letters/digits/apostrophe; punctuation is dropped by the
-    aligner). Returns None if the mapping fails (caller falls back).
-    """
+
+def _align_char_spans(transcript: str, items, is_kept):
+    """Map each aligner item to its (start, end) char offsets in the transcript."""
     spans = []
     pos = 0
     for it in items:
@@ -156,13 +192,7 @@ def _align_char_spans(transcript: str, items, is_kept):
 
 
 def _trim_to_zone(transcript: str, items, wa: int, zs: int, ze: int, is_kept):
-    """Keep transcript text whose token centers fall inside trusted zone [zs, ze).
-
-    Token times from the aligner are window-relative (window starts at `wa`).
-    The text is cut in char-space: leading/trailing punctuation between the
-    kept token span and its neighbours follows the zone that owns the words.
-    Returns None when nothing can be attributed (caller falls back).
-    """
+    """Keep transcript text whose token centers fall inside trusted zone [zs, ze)."""
     if not items:
         return None
     spans = _align_char_spans(transcript, items, is_kept)
@@ -175,6 +205,153 @@ def _trim_to_zone(transcript: str, items, wa: int, zs: int, ze: int, is_kept):
     first, last = keep[0], keep[-1]
     end_char = spans[last + 1][0] if last + 1 < len(items) else len(transcript)
     return transcript[spans[first][0]:end_char].strip()
+
+
+def _resolve_align_language(result, supported: dict, legacy_fallback: bool) -> Optional[str]:
+    lang_key = str(result.language or "").lower()
+    if lang_key in supported:
+        return supported[lang_key]
+    if not lang_key:
+        return None if legacy_fallback else DEFAULT_ALIGN_LANGUAGE
+    return None
+
+
+def _batch_transcribe(model, audios, context: str, language: Optional[str]):
+    if not audios:
+        return []
+    return model.transcribe(
+        audio=audios,
+        context=context,
+        language=language,
+        return_time_stamps=False,
+    )
+
+
+def _infer_zones_batch(
+    wav: np.ndarray,
+    specs: List[ZoneSpec],
+    model,
+    aligner: Optional[Qwen3ForcedAligner],
+    is_kept,
+    supported: dict,
+    *,
+    context: str,
+    language: Optional[str],
+    no_trim: bool,
+    legacy_fallback: bool,
+) -> List[ZoneOutcome]:
+    n = len(specs)
+    window_audios = [(wav[s.wa:s.wb], SAMPLE_RATE) for s in specs]
+    window_results = _batch_transcribe(model, window_audios, context, language)
+
+    outcomes: List[Optional[ZoneOutcome]] = [None] * n
+    fallback_indices: List[int] = []
+
+    if no_trim:
+        for i, (spec, result) in enumerate(zip(specs, window_results)):
+            if result.text:
+                outcomes[i] = ZoneOutcome(
+                    text=result.text,
+                    note="no-trim (exact zone)",
+                    language=result.language,
+                    spec=spec,
+                )
+            else:
+                outcomes[i] = ZoneOutcome("", "empty transcript", result.language, spec)
+        return outcomes  # type: ignore[return-value]
+
+    if legacy_fallback or aligner is None:
+        exact_audios = [(wav[s.zs:s.ze], SAMPLE_RATE) for s in specs]
+        exact_results = _batch_transcribe(model, exact_audios, context, language)
+        for i, (spec, result) in enumerate(zip(specs, exact_results)):
+            outcomes[i] = ZoneOutcome(
+                text=result.text or "",
+                note="FALLBACK (legacy mode)",
+                language=result.language,
+                spec=spec,
+            )
+        return outcomes  # type: ignore[return-value]
+
+    align_indices: List[int] = []
+    align_audios = []
+    align_texts: List[str] = []
+    align_langs: List[str] = []
+
+    for i, (spec, result) in enumerate(zip(specs, window_results)):
+        if not result.text:
+            outcomes[i] = ZoneOutcome("", "empty transcript", result.language, spec)
+            continue
+
+        align_lang = _resolve_align_language(result, supported, legacy_fallback)
+        if align_lang is None:
+            fallback_indices.append(i)
+            continue
+
+        align_indices.append(i)
+        align_audios.append((wav[spec.wa:spec.wb], SAMPLE_RATE))
+        align_texts.append(result.text)
+        align_langs.append(align_lang)
+
+    align_results = []
+    if align_indices:
+        try:
+            align_results = aligner.align(
+                audio=align_audios,
+                text=align_texts,
+                language=align_langs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] batch alignment failed ({type(exc).__name__}); "
+                  f"falling back {len(align_indices)} zone(s)")
+            fallback_indices.extend(align_indices)
+            align_indices = []
+            align_results = []
+
+    for zone_i, result, alignment in zip(
+            align_indices, [window_results[i] for i in align_indices], align_results):
+        spec = specs[zone_i]
+        zone_text = _trim_to_zone(result.text, alignment.items, spec.wa, spec.zs, spec.ze, is_kept)
+        if zone_text is None:
+            fallback_indices.append(zone_i)
+            continue
+
+        centers = [spec.wa + (it.start_time + it.end_time) / 2.0 * SAMPLE_RATE
+                   for it in alignment.items]
+        kept = [c for c in centers if spec.zs <= c < spec.ze]
+        zone_dur = (spec.ze - spec.zs) / SAMPLE_RATE
+        kept_span = (max(kept) - min(kept)) / SAMPLE_RATE if kept else 0.0
+        if zone_dur >= 10.0 and kept_span < 0.5 * zone_dur:
+            note = (f"FALLBACK (kept span {kept_span:.1f}s covers "
+                    f"{kept_span / zone_dur * 100:.0f}% of {zone_dur:.1f}s zone)")
+            print(f"[warn] zone {zone_i + 1}: {note}")
+            fallback_indices.append(zone_i)
+            continue
+
+        outcomes[zone_i] = ZoneOutcome(
+            text=zone_text,
+            note="kept tokens within zone",
+            language=result.language,
+            spec=spec,
+        )
+
+    if fallback_indices:
+        fallback_indices = sorted(set(fallback_indices))
+        exact_audios = [(wav[specs[i].zs:specs[i].ze], SAMPLE_RATE) for i in fallback_indices]
+        exact_results = _batch_transcribe(model, exact_audios, context, language)
+        for i, result in zip(fallback_indices, exact_results):
+            outcomes[i] = ZoneOutcome(
+                text=result.text or "",
+                note="FALLBACK (exact zone)",
+                language=result.language,
+                spec=specs[i],
+            )
+
+    for i, outcome in enumerate(outcomes):
+        if outcome is None:
+            outcomes[i] = ZoneOutcome("", "FALLBACK (no tokens attributed to zone)",
+                                      window_results[i].language, specs[i])
+
+    return outcomes  # type: ignore[return-value]
 
 
 def _smart_join(a: str, b: str) -> str:
@@ -196,10 +373,11 @@ def main():
                         help="ForcedAligner model for trusted-zone token timestamps")
     parser.add_argument("--language", type=str, default=None, help="Force language (e.g. 'Cantonese')")
     parser.add_argument("--context", type=str, default="", help="Context string (hotwords)")
-    parser.add_argument("--trusted_zone_sec", type=float, default=35.0,
-                        help="Trusted-zone upper bound in seconds (default: 35)")
+    parser.add_argument("--trusted_zone_sec", type=float, default=30.0,
+                        help="Trusted-zone upper bound in seconds (default: 30)")
     parser.add_argument("--pad_sec", type=float, default=5.0,
-                        help="Padding on each side of a zone when building the transcribed window")
+                        help="Padding on each side of a zone when building the transcribed window "
+                             "(only used with --trim)")
     parser.add_argument("--min_zone_sec", type=float, default=10.0,
                         help="Zone lower bound in seconds (default: 10)")
     parser.add_argument("--min_silence_sec", type=float, default=0.4,
@@ -208,9 +386,19 @@ def main():
                         choices=["greedy", "longest_zone"],
                         help="Zone cut policy: greedy=longest pause in window; "
                              "longest_zone=latest pause (zones as long as trusted_zone_sec allows)")
+    parser.add_argument("--trim", action="store_true",
+                        help="Use padded windows + forced-aligner trim instead of the default "
+                             "exact-zone transcription (no padding, no aligner).")
+    parser.add_argument("--legacy_fallback", action="store_true",
+                        help="When the ASR model returns no language tag, skip aligner "
+                             "trim and re-transcribe the exact zone (v1 eval behaviour). "
+                             "Only applies with --trim.")
     args = parser.parse_args()
 
-    if args.trusted_zone_sec + 2 * args.pad_sec >= 50:
+    no_trim = not args.trim
+    pad_sec = 0.0 if no_trim else args.pad_sec
+
+    if args.trusted_zone_sec + 2 * pad_sec >= 50:
         raise SystemExit("trusted_zone_sec + 2*pad_sec must stay < 50 "
                          "(Qwen3-ASR long-audio safety bound)")
 
@@ -219,8 +407,10 @@ def main():
     silences = find_silence_runs_fsmn(args.audio, total, args.min_silence_sec)
     zones = split_at_silence(total, silences, args.trusted_zone_sec, args.min_zone_sec,
                              args.min_silence_sec, args.split_policy)
+    specs = _build_zone_specs(zones, total, pad_sec)
+    mode = "no_trim" if no_trim else ("legacy_fallback" if args.legacy_fallback else "trim+align")
     print(f"Audio: {total / SAMPLE_RATE:.1f}s -> {len(zones)} trusted zone(s) "
-          f"(split_policy={args.split_policy})\n")
+          f"(split_policy={args.split_policy}, mode={mode})\n")
 
     if os.path.exists(args.model) or "/" in args.model or "\\" in args.model:
         model_name = args.model
@@ -230,47 +420,39 @@ def main():
     model = Qwen3ASRModel.from_pretrained(
         model_name, dtype=torch.bfloat16, device_map="cuda:0", max_new_tokens=1024)
 
-    print(f"Loading aligner: {args.aligner}")
-    aligner = Qwen3ForcedAligner.from_pretrained(args.aligner, dtype=torch.bfloat16, device_map="cuda:0")
-    is_kept = aligner.aligner_processor.is_kept_char
-    supported = {str(l).lower(): str(l) for l in (aligner.get_supported_languages() or [])}
+    aligner = None
+    is_kept = None
+    supported = {}
+    if not no_trim and not args.legacy_fallback:
+        print(f"Loading aligner: {args.aligner}")
+        aligner = Qwen3ForcedAligner.from_pretrained(
+            args.aligner, dtype=torch.bfloat16, device_map="cuda:0")
+        is_kept = aligner.aligner_processor.is_kept_char
+        supported = {str(l).lower(): str(l) for l in (aligner.get_supported_languages() or [])}
+    else:
+        print("Skipping aligner load (no_trim or legacy_fallback mode)")
 
-    def transcribe(audio_tuple):
-        return model.transcribe(audio=audio_tuple, context=args.context,
-                                language=args.language, return_time_stamps=False)[0]
+    outcomes = _infer_zones_batch(
+        wav,
+        specs,
+        model,
+        aligner,
+        is_kept,
+        supported,
+        context=args.context,
+        language=args.language,
+        no_trim=no_trim,
+        legacy_fallback=args.legacy_fallback,
+    )
 
     texts = []
-    for i, (zs, ze) in enumerate(zones, 1):
-        wa, wb = max(0, int(zs - args.pad_sec * SAMPLE_RATE)), min(total, int(ze + args.pad_sec * SAMPLE_RATE))
-        result = transcribe((wav[wa:wb], SAMPLE_RATE))
-
-        zone_text, note = None, ""
-        if result.text:
-            lang_key = str(result.language or "").lower()
-            if lang_key not in supported:
-                note = f"FALLBACK (aligner language '{result.language}' unsupported)"
-            else:
-                try:
-                    alignment = aligner.align(audio=(wav[wa:wb], SAMPLE_RATE),
-                                              text=result.text,
-                                              language=supported[lang_key])[0]
-                    zone_text = _trim_to_zone(result.text, alignment.items, wa, zs, ze, is_kept)
-                    if zone_text is None:
-                        note = "FALLBACK (no tokens attributed to zone)"
-                    else:
-                        note = "kept tokens within zone"
-                except Exception as exc:  # noqa: BLE001
-                    note = f"FALLBACK (alignment failed: {type(exc).__name__})"
-            if zone_text is None:
-                result = transcribe((wav[zs:ze], SAMPLE_RATE))
-                zone_text = result.text
-        else:
-            zone_text, note = "", "empty transcript"
-
-        texts.append(zone_text)
-        print(f"[zone {i}/{len(zones)} {zs / SAMPLE_RATE:7.1f}-{ze / SAMPLE_RATE:7.1f}s | "
-              f"window {wa / SAMPLE_RATE:6.1f}-{wb / SAMPLE_RATE:6.1f}s] language={result.language!r} {note}")
-        print(f"  {zone_text}")
+    for i, outcome in enumerate(outcomes, 1):
+        spec = outcome.spec
+        texts.append(outcome.text)
+        print(f"[zone {i}/{len(outcomes)} {spec.zs / SAMPLE_RATE:7.1f}-{spec.ze / SAMPLE_RATE:7.1f}s | "
+              f"window {spec.wa / SAMPLE_RATE:6.1f}-{spec.wb / SAMPLE_RATE:6.1f}s] "
+              f"language={outcome.language!r} {outcome.note}")
+        print(f"  {outcome.text}")
 
     full = ""
     for t in texts:
