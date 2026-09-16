@@ -571,6 +571,13 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         val = training.get(key)
         if val is not None and key in training:
             cmd.extend([flag, str(val)])
+    extra_eval_sets = training.get("extra_eval_sets") or {}
+    if not isinstance(extra_eval_sets, dict):
+        raise ValueError("training.extra_eval_sets must be a mapping of name to jsonl/csv path.")
+    for set_name, set_path in extra_eval_sets.items():
+        if not str(set_path or "").strip():
+            raise ValueError(f"training.extra_eval_sets[{set_name!r}] is empty.")
+        cmd.extend(["--extra_eval_set", f"{set_name}={abspath(str(set_path))}"])
     if runtime.get("resume") is True and "resume" not in training:
         cmd.extend(["--resume", "1"])
     run_command(cmd, dry_run=dry_run, log_file=os.path.join(output_dir, "logs", "train.log"))

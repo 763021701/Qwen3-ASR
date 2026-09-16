@@ -658,6 +658,40 @@ def _wer_extract_ref(label: str) -> str:
     return s
 
 
+def _load_extra_eval_items(spec: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """NAME=PATH -> (name, [(audio_path, reference_text), ...]) for report-only evals.
+
+    .jsonl rows use audio_path/audio + text; .csv rows use audio_path,text columns.
+    """
+    name, sep, path = spec.partition("=")
+    name, path = name.strip(), path.strip()
+    if not name or not sep or not path:
+        raise ValueError(f"--extra_eval_set expects NAME=PATH, got {spec!r}")
+    rows: List[Tuple[str, str]] = []
+    if path.lower().endswith(".csv"):
+        import csv
+
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                audio = str(row.get("audio_path") or row.get("audio") or "").strip()
+                text = str(row.get("text") or "").strip()
+                if audio and text:
+                    rows.append((audio, text))
+    else:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                audio = str(item.get("audio_path") or item.get("audio") or "").strip()
+                text = str(item.get("text") or "").strip()
+                if audio and text:
+                    rows.append((audio, text))
+    if not rows:
+        raise ValueError(f"--extra_eval_set {name!r}: no audio/text rows loaded from {path}")
+    return name, rows
+
+
 def _wer_lang_from_label(label: str) -> str:
     """Map the language atom in a data label to the scoring language."""
     head = label.split(_ASR_TEXT_TAG, 1)[0].lower() if _ASR_TEXT_TAG in (label or "") else ""
@@ -687,6 +721,7 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         seed=1234,
         metric="wer",
         output_dir="",
+        extra_eval_sets=None,
     ):
         super().__init__(limit)
         self.asr_wrapper = asr_wrapper
@@ -703,6 +738,7 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         self.metric = metric
         self.ranking_filename = f"best_{metric}_checkpoints.json"
         self.predictions_dir = os.path.join(output_dir, "generation_eval") if output_dir else ""
+        self.extra_eval_sets = list(extra_eval_sets or [])
         self._subset = None
 
     def _load_ranking(self, output_dir: str) -> None:
@@ -766,8 +802,8 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
             wav = apply_speed_perturbation(wav, self.sr, factor)
         return wav
 
-    def _compute_error_rate(self) -> tuple[float, List[Dict[str, str]]]:
-        items = self._build_subset()
+    def _transcribe_items(self, items) -> List[str]:
+        """Greedy transcription of (audio_path, reference, lang) triples."""
         hypotheses = [""] * len(items)
         model = self.asr_wrapper.model
         was_training = model.training
@@ -785,6 +821,11 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
                         hypotheses[start + offset] = text or ""
         finally:
             model.train(was_training)
+        return hypotheses
+
+    def _compute_error_rate(self) -> tuple[float, List[Dict[str, str]]]:
+        items = self._build_subset()
+        hypotheses = self._transcribe_items(items)
 
         if self.metric == "cer":
             from evaluation.english_medical.text_normalization import normalize_english
@@ -819,6 +860,70 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
         normalized_hypotheses = [record["hypothesis_normalized"] for record in records]
         return float(compute_wer(references, normalized_hypotheses)["wer"]), records
 
+    def _extra_eval_report(self, step: int, dev_records: List[Dict[str, str]]) -> None:
+        """Transcribe --extra_eval_set manifests and print per-set CER + S/D/I.
+
+        Report-only: never feeds best-checkpoint selection.
+        """
+        if not self.extra_eval_sets:
+            return
+        from evaluation.english_medical.text_normalization import normalize_english
+        from qwen3_asr_grpo import cer_decomposition
+
+        all_records = list(dev_records)
+        for name, items in self.extra_eval_sets:
+            triples = [(audio, reference, None) for audio, reference in items]
+            hypotheses = self._transcribe_items(triples)
+            records = [
+                {
+                    "audio": audio,
+                    "reference": reference,
+                    "reference_normalized": normalize_english(reference),
+                    "hypothesis": hypothesis,
+                    "hypothesis_normalized": normalize_english(hypothesis),
+                }
+                for (audio, reference, _), hypothesis in zip(triples, hypotheses)
+            ]
+            if self.predictions_dir:
+                os.makedirs(self.predictions_dir, exist_ok=True)
+                predictions_path = os.path.join(
+                    self.predictions_dir, f"step-{step}_{name}_predictions.jsonl"
+                )
+                with open(predictions_path, "w", encoding="utf-8") as handle:
+                    for record in records:
+                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            subs = dels = ins = ref_len = 0
+            for record in records:
+                s, d, i, n = cer_decomposition(record["reference"], record["hypothesis"])
+                subs += s
+                dels += d
+                ins += i
+                ref_len += n
+            cer = _corpus_character_error_rate(
+                [record["reference_normalized"] for record in records],
+                [record["hypothesis_normalized"] for record in records],
+            )
+            print(
+                "[extra-eval] step=%d %s clips=%d cer=%.4f S=%d D=%d I=%d"
+                % (step, name, len(records), cer, subs, dels, ins)
+            )
+            all_records.extend(records)
+        subs = dels = ins = ref_len = 0
+        for record in all_records:
+            s, d, i, n = cer_decomposition(record["reference"], record["hypothesis"])
+            subs += s
+            dels += d
+            ins += i
+            ref_len += n
+        cer = _corpus_character_error_rate(
+            [record["reference_normalized"] for record in all_records],
+            [record["hypothesis_normalized"] for record in all_records],
+        )
+        print(
+            "[extra-eval] step=%d TOTAL clips=%d cer=%.4f S=%d D=%d I=%d"
+            % (step, len(all_records), cer, subs, dels, ins)
+        )
+
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if args.process_index != 0 or self.eval_dataset is None:
             return control
@@ -839,6 +944,7 @@ class KeepBestWerCheckpointsCallback(KeepBestCheckpointsCallback):
             "[best-%s] step=%d %s=%.4f"
             % (self.metric, state.global_step, self.metric, value)
         )
+        self._extra_eval_report(int(state.global_step), records)
         return control
 
 
@@ -935,6 +1041,16 @@ def parse_args():
     p.add_argument("--model_path", type=str, default="Qwen/Qwen3-ASR-1.7B")
     p.add_argument("--train_file", type=str, default="train.jsonl")
     p.add_argument("--eval_file", type=str, default="")
+    p.add_argument(
+        "--extra_eval_set",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Report-only eval set transcribed at every dev evaluation: prints per-set "
+             "CER plus substitutions/deletions/insertions (insertion count is the "
+             "hallucination signal). .jsonl rows need audio_path+text; .csv needs "
+             "audio_path,text columns. Best-checkpoint selection still uses --eval_file.",
+    )
     p.add_argument("--output_dir", type=str, default="./qwen3-asr-finetuning-out")
 
     # Audio
@@ -1190,6 +1306,9 @@ def main():
                 speed_max=args_cli.eval_speed_max,
                 metric=args_cli.save_best_metric,
                 output_dir=args_cli.output_dir,
+                extra_eval_sets=[
+                    _load_extra_eval_items(spec) for spec in args_cli.extra_eval_set
+                ],
             ))
         else:
             callbacks.append(KeepBestCheckpointsCallback(limit=keep_best_limit))
