@@ -22,6 +22,7 @@
 6. 此前 v2 合成集 5 倍真实域、`1e-5` 学习率的 SFT 得到最佳 dev loss `0.59243`，评测 WER `15.71%`。
 7. 第一轮 GRPO（全量 mined 数据、`8` generations、`5e-7`）在 `checkpoint-30000` 达到 `13.16%` WER，基本保持 SFT 能力；后续高学习率或纯真实域 GRPO 没有稳定改善。
 8. 真实域-only、`-CER` 的 GRPO 在选定 checkpoint 上为 `15.55%` WER、`10.46%` CER，说明 CER 目标可以改善字符级相似度，但没有改善 WER。
+9. 2026-09-21：从 plus0821 SFT `checkpoint-3900` 出发、冻结 audio tower、只在真实域上做 prompt 热词小规模 continue-SFT，**没有恢复 LLM 热词跟随**，空 context POC WER 还略差。权重已删，只留日志和评测。
 
 ## 2. 统一评测约定
 
@@ -42,14 +43,14 @@
 
 | 数据清单 | 条数 | 来源构成 | 时长 | 用途 |
 |---|---:|---|---:|---|
-| [`train.jsonl`](../data/poc_train_real_tcga_1to3_5silence_none/train.jsonl) | 25,687 | TCGA 合成 19,928；真实域 4,138；静音 1,621 | 38.17h / 12.72h / 2.68h | 初始 SFT |
-| [`train_real_only.jsonl`](../data/poc_train_real_tcga_1to3_5silence_none/train_real_only.jsonl) | 896 | 真实域 896 条独立录音 | 2.75h | real-only SFT/对照 |
-| [`train_filtered_tcga_catastrophic_keep_best015.jsonl`](../data/poc_train_real_tcga_1to3_5silence_none/train_filtered_tcga_catastrophic_keep_best015.jsonl) | 22,947 | 合成 17,197；真实域 4,129；静音 1,621 | 33.25h / 12.70h / 2.68h | 清洗 catastrophic 后 SFT |
-| [`train_filtered_tcga_catastrophic_keep_best015_real_full_synth20h.jsonl`](../data/poc_train_real_tcga_1to3_5silence_none/train_filtered_tcga_catastrophic_keep_best015_real_full_synth20h.jsonl) | 11,370 | 合成 9,899；真实域 896；静音 575 | 19.05h / 2.75h / 0.95h | 不重复真实域、合成约 20h |
-| [`v2 real4x train.jsonl`](../data/poc_train_tcga_v2_42h_real4x/train.jsonl) | 20,396 | v2 合成 16,812；真实域 3,584（4x） | 41.98h / 11.01h | v2 合成集 SFT |
-| [`v2 real5x train.jsonl`](../data/poc_train_tcga_v2_42h_real5x/train.jsonl) | 21,292 | v2 合成 16,812；真实域 4,480（5x） | 41.98h / 13.77h | v2 合成集 SFT |
-| [`train.jsonl`](../data/poc_train_real_llm_syn_full_testdev/train.jsonl) | 4,525 | 真实域 2,620（raw/denoised 各 1,310）；LLM 文本 TTS 合成 1,905 | 5.297h / 3.64h | LLM 合成 + CER 选点 SFT（2026-08-20） |
-| [`train.jsonl`](../data/poc_train_real_llm_syn_cantonese_num_measure_2voice/train.jsonl) | 8,017 | 真实域 2,620；LLM 合成 1,905；粤语号码 1,686；粤语度量 1,806 | 5.296h / 3.628h / 0.718h / 1.003h | 最新 SFT（2026-08-21） |
+| [`train.jsonl`](../archive/data/poc_train_real_tcga_1to3_5silence_none/train.jsonl) | 25,687 | TCGA 合成 19,928；真实域 4,138；静音 1,621 | 38.17h / 12.72h / 2.68h | 初始 SFT |
+| [`train_real_only.jsonl`](../archive/data/poc_train_real_tcga_1to3_5silence_none/train_real_only.jsonl) | 896 | 真实域 896 条独立录音 | 2.75h | real-only SFT/对照 |
+| [`train_filtered_tcga_catastrophic_keep_best015.jsonl`](../archive/data/poc_train_real_tcga_1to3_5silence_none/train_filtered_tcga_catastrophic_keep_best015.jsonl) | 22,947 | 合成 17,197；真实域 4,129；静音 1,621 | 33.25h / 12.70h / 2.68h | 清洗 catastrophic 后 SFT |
+| [`train_filtered_tcga_catastrophic_keep_best015_real_full_synth20h.jsonl`](../archive/data/poc_train_real_tcga_1to3_5silence_none/train_filtered_tcga_catastrophic_keep_best015_real_full_synth20h.jsonl) | 11,370 | 合成 9,899；真实域 896；静音 575 | 19.05h / 2.75h / 0.95h | 不重复真实域、合成约 20h |
+| [`v2 real4x train.jsonl`](../archive/data/poc_train_tcga_v2_42h_real4x/train.jsonl) | 20,396 | v2 合成 16,812；真实域 3,584（4x） | 41.98h / 11.01h | v2 合成集 SFT |
+| [`v2 real5x train.jsonl`](../archive/data/poc_train_tcga_v2_42h_real5x/train.jsonl) | 21,292 | v2 合成 16,812；真实域 4,480（5x） | 41.98h / 13.77h | v2 合成集 SFT |
+| [`train.jsonl`](../archive/data/poc_train_real_llm_syn_full_testdev/train.jsonl) | 4,525 | 真实域 2,620（raw/denoised 各 1,310）；LLM 文本 TTS 合成 1,905 | 5.297h / 3.64h | LLM 合成 + CER 选点 SFT（2026-08-20） |
+| [`train.jsonl`](../archive/data/poc_train_real_llm_syn_cantonese_num_measure_2voice/train.jsonl) | 8,017 | 真实域 2,620；LLM 合成 1,905；粤语号码 1,686；粤语度量 1,806 | 5.296h / 3.628h / 0.718h / 1.003h | 最新 SFT（2026-08-21） |
 
 真实域 5 倍采样后的 4,480 条并不是 4,480 条独立录音，而是 896 条录音的重复权重。它能改变优化目标的权重，不能补充 `SN1/SN2/non-SN`、`scrape cytology` 等短语的真实声学覆盖。
 
@@ -57,16 +58,16 @@
 
 | 实验 | 配置 | 训练数据 | 最佳 dev loss | 评测结果 | 输出 |
 |---|---|---|---:|---:|---|
-| 初始 SFT | [`poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_3ep.yaml`](../configs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_3ep.yaml) | 25,687 条；`lr=2e-5`；增强；3 epoch | 记录的最佳 dev 为 `0.53572`（checkpoint-300；模型目录已不在输出中） | checkpoint-500：`13.40%` WER | [`output`](../outputs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_3ep)；[`baseline summary`](../outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g8_lr5e7_1ep/eval/checkpoint-0_poc_test_summary.txt) |
-| 标签括号清洗 SFT | [`poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_bracketnorm_earlystop.yaml`](../configs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_bracketnorm_earlystop.yaml) | 同初始数据；`strip_target_brackets=1`；早停 | 记录的最佳 dev 为 `0.52442`（checkpoint-500；模型目录已不在输出中） | checkpoint-200：`14.95%`；checkpoint-500：`16.15%` | [`output`](../outputs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_bracketnorm_earlystop) |
-| 真实域-only SFT | [`poc_train_real_only_sft_lr2e5_earlystop.yaml`](../configs/poc_train_real_only_sft_lr2e5_earlystop.yaml) | 896 条真实录音；无增强；`lr=2e-5` | `1.08986`，checkpoint-25 | `19.05%` WER | [`output`](../outputs/poc_train_real_only_sft_lr2e5_earlystop) |
+| 初始 SFT | [`poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_3ep.yaml`](../archive/configs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_3ep.yaml) | 25,687 条；`lr=2e-5`；增强；3 epoch | 记录的最佳 dev 为 `0.53572`（checkpoint-300；模型目录已不在输出中） | checkpoint-500：`13.40%` WER | [`output`](../archive/outputs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_3ep)；[`baseline summary`](../outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g8_lr5e7_1ep/eval/checkpoint-0_poc_test_summary.txt) |
+| 标签括号清洗 SFT | [`poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_bracketnorm_earlystop.yaml`](../archive/configs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_bracketnorm_earlystop.yaml) | 同初始数据；`strip_target_brackets=1`；早停 | 记录的最佳 dev 为 `0.52442`（checkpoint-500；模型目录已不在输出中） | checkpoint-200：`14.95%`；checkpoint-500：`16.15%` | [`output`](../outputs/poc_train_real_tcga_1to3_5silence_none_sft_lr2e5_bracketnorm_earlystop) |
+| 真实域-only SFT | [`poc_train_real_only_sft_lr2e5_earlystop.yaml`](../archive/configs/poc_train_real_only_sft_lr2e5_earlystop.yaml) | 896 条真实录音；无增强；`lr=2e-5` | `1.08986`，checkpoint-25 | `19.05%` WER | [`output`](../outputs/poc_train_real_only_sft_lr2e5_earlystop) |
 | 清洗 catastrophic 后 SFT | 配置文件未保留；训练参数可由 output 中的 `trainer_args.bin` 和 checkpoint-400 还原 | 22,947 条；删除合成坏样本；`lr=2e-5` | `0.56703`，checkpoint-400 | `14.76%` WER；15/53 exact | [`output`](../outputs/poc_train_real_tcga_1to3_5silence_none_sft_filtered_tcga_catastrophic_keep_best015_lr2e5_earlystop) |
-| 真实域不重复、合成约 20h | [`poc_train_real_tcga_1to3_5silence_none_sft_real_full_synth20h_lr2e5_earlystop.yaml`](../configs/poc_train_real_tcga_1to3_5silence_none_sft_real_full_synth20h_lr2e5_earlystop.yaml) | 11,370 条；真实域 896 条原始数量；合成约 20h | `0.61965`，checkpoint-300 | `31.19%` WER（53 条 dev） | [`output`](../outputs/poc_train_real_tcga_1to3_5silence_none_sft_real_full_synth20h_lr2e5_earlystop) |
-| v2 合成、真实域 4x | [`poc_train_tcga_v2_42h_real4x_sft_lr2e5_earlystop.yaml`](../configs/poc_train_tcga_v2_42h_real4x_sft_lr2e5_earlystop.yaml) | v2 合成 41.98h；真实域 4x；`lr=2e-5` | `0.63298`，checkpoint-200 | `17.62%` WER；12/53 exact | [`output`](../outputs/poc_train_tcga_v2_42h_real4x_sft_lr2e5_earlystop) |
-| v2 合成、真实域 5x | [`poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop.yaml`](../configs/poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop.yaml) | v2 合成 41.98h；真实域 5x；`lr=1e-5` | `0.59243`，checkpoint-500 | `15.71%` WER；9/53 exact | [`output`](../outputs/poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop)；[`summary`](../outputs/poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop/eval/checkpoint-500_poc_test_summary.txt) |
-| 真实域 raw + denoised SFT | [`poc_train_real_raw_denoised_sft_lr2e5_3ep.yaml`](../configs/poc_train_real_raw_denoised_sft_lr2e5_3ep.yaml) | raw 1363 条 + denoised 1363 条；各使用一次；标签为 `language None<asr_text>` | `0.612891`，checkpoint-125 | `9.17%` WER；16/53 exact | [`output`](../outputs/poc_train_real_raw_denoised_sft_lr2e5_3ep)；[`predictions`](../outputs/poc_train_real_raw_denoised_sft_lr2e5_3ep/eval_checkpoint-125/predictions.jsonl) |
-| 真实域 + LLM 合成、CER 选点 SFT | [`poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep.yaml`](../configs/poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep.yaml) | 真实域 2,620 + LLM 合成 1,905；`use_test_as_dev=1`；`save_best_metric=cer` 保留最低 5 个 | CER 最佳 `0.0791`，checkpoint-275 | 当时归一化 `10.24%` WER；按当前归一化重测 `10.12%` WER、25/53 exact | [`output`](../outputs/poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep)；[`summary`](../outputs/poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep/eval/checkpoint-275_poc_test_summary.txt) |
-| 真实域 + LLM 合成 + 粤语号码/度量（2 音色）SFT | [`poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep.yaml`](../configs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep.yaml) | 上行数据 + 粤语号码 1,686 + 粤语度量 1,806（每归一化文本 ≤2 音色）；`save_best_metric=cer`；`wer_max_new_tokens=512` | CER 最佳 `0.0739`，checkpoint-250 | `9.76%` WER、`7.39%` CER；22/53 exact | [`output`](../outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep)；[`predictions`](../outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep/eval/checkpoint-250_poc_test_predictions.jsonl) |
+| 真实域不重复、合成约 20h | [`poc_train_real_tcga_1to3_5silence_none_sft_real_full_synth20h_lr2e5_earlystop.yaml`](../archive/configs/poc_train_real_tcga_1to3_5silence_none_sft_real_full_synth20h_lr2e5_earlystop.yaml) | 11,370 条；真实域 896 条原始数量；合成约 20h | `0.61965`，checkpoint-300 | `31.19%` WER（53 条 dev） | [`output`](../outputs/poc_train_real_tcga_1to3_5silence_none_sft_real_full_synth20h_lr2e5_earlystop) |
+| v2 合成、真实域 4x | [`poc_train_tcga_v2_42h_real4x_sft_lr2e5_earlystop.yaml`](../archive/configs/poc_train_tcga_v2_42h_real4x_sft_lr2e5_earlystop.yaml) | v2 合成 41.98h；真实域 4x；`lr=2e-5` | `0.63298`，checkpoint-200 | `17.62%` WER；12/53 exact | [`output`](../outputs/poc_train_tcga_v2_42h_real4x_sft_lr2e5_earlystop) |
+| v2 合成、真实域 5x | [`poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop.yaml`](../archive/configs/poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop.yaml) | v2 合成 41.98h；真实域 5x；`lr=1e-5` | `0.59243`，checkpoint-500 | `15.71%` WER；9/53 exact | [`output`](../outputs/poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop)；[`summary`](../outputs/poc_train_tcga_v2_42h_real5x_sft_lr1e5_earlystop/eval/checkpoint-500_poc_test_summary.txt) |
+| 真实域 raw + denoised SFT | [`poc_train_real_raw_denoised_sft_lr2e5_3ep.yaml`](../archive/configs/poc_train_real_raw_denoised_sft_lr2e5_3ep.yaml) | raw 1363 条 + denoised 1363 条；各使用一次；标签为 `language None<asr_text>` | `0.612891`，checkpoint-125 | `9.17%` WER；16/53 exact | [`output`](../archive/outputs/poc_train_real_raw_denoised_sft_lr2e5_3ep)；[`predictions`](../archive/outputs/poc_train_real_raw_denoised_sft_lr2e5_3ep/eval_checkpoint-125/predictions.jsonl) |
+| 真实域 + LLM 合成、CER 选点 SFT | [`poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep.yaml`](../archive/configs/poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep.yaml) | 真实域 2,620 + LLM 合成 1,905；`use_test_as_dev=1`；`save_best_metric=cer` 保留最低 5 个 | CER 最佳 `0.0791`，checkpoint-275 | 当时归一化 `10.24%` WER；按当前归一化重测 `10.12%` WER、25/53 exact | [`output`](../archive/outputs/poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep)；[`summary`](../archive/outputs/poc_train_real_llm_syn_full_testdev_cer_sft_lr2e5_3ep/eval/checkpoint-275_poc_test_summary.txt) |
+| 真实域 + LLM 合成 + 粤语号码/度量（2 音色）SFT | [`poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep.yaml`](../archive/configs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep.yaml) | 上行数据 + 粤语号码 1,686 + 粤语度量 1,806（每归一化文本 ≤2 音色）；`save_best_metric=cer`；`wer_max_new_tokens=512` | CER 最佳 `0.0739`，checkpoint-250 | `9.76%` WER、`7.39%` CER；22/53 exact | [`output`](../archive/outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep)；[`predictions`](../archive/outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep/eval/checkpoint-250_poc_test_predictions.jsonl) |
 
 ### 最新真实域 raw/denoised SFT
 
@@ -145,13 +146,26 @@
 
 结论：penalty 对**周期性重复循环**有效（fp/pp=1.5 均归零），fp=1.5 下贪心转写质量最好；但它不能恢复域外长音频上的正常终止与连贯性（fp=5.0 贪心仍顶格 rambling，pp=1.5 尾部退化）。penalty 是推理期缓解手段，不改变模型在该域上的整体能力。
 
-产物：第一轮 [`rollout_radiology/`](../outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep/rollout_radiology/rollout_loop_test.jsonl)（实际为贪心 ×10/音频）；复测 [`rollout_radiology_v3/`](../outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep/rollout_radiology_v3/rollout_loop_test.jsonl)。
+产物：第一轮 [`rollout_radiology/`](../archive/outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep/rollout_radiology/rollout_loop_test.jsonl)（实际为贪心 ×10/音频）；复测 [`rollout_radiology_v3/`](../archive/outputs/poc_train_real_llm_syn_cantonese_num_measure_2voice_full_testdev_cer_sft_lr2e5_3ep/rollout_radiology_v3/rollout_loop_test.jsonl)。
+
+### 2026-09-21 SFT-3900 真实域 prompt 热词 continue-SFT（负结果）
+
+配置 [`poc_sft3900_real_hotword_prompt_ft.yaml`](../archive/configs/poc_sft3900_real_hotword_prompt_ft.yaml)。从 plus0821 `checkpoint-3900` 继续训，冻结 `encoder,aligner`，`lr=5e-6`，2 epoch，无在线增强。训练数据只含真实域：空 prompt 2902 条 + 带 prompt 722 条（金标 449 / 金标+干扰 166 / 干扰 107），POC 53 条 test 未入训。清单由 [`tools/build_hotword_prompt_jsonl.py`](../tools/build_hotword_prompt_jsonl.py) 从 plus0821 `train.jsonl` 抽取。
+
+| 模型 | 训练 CER | 53 条 POC WER | 10 条 gold 命中 / hard 命中 | 10 条 distractor 插入 |
+|---|---:|---:|---|---:|
+| SFT-3900 | 5.63% | 7.65% | 62% / 52% | 35% |
+| prompt-FT 最佳 step-100 | 5.89% | 8.00% | 62% / 52% | 40% |
+
+金标命中与 3900 相同；`SN 1`、`coronal full slabs`、`frozen and paraffin sections` 等模板错误仍在。空 context 略退化（10 条 WER 14.38% → 15.69%）。结论：几百条真实域 prompt 不足以覆盖 3900 已学死的空 context 习惯。若再做热词恢复，应把 prompt 扩到 67k 混训，或改同一音频 gold vs distractor 的对比学习，而不是重复本配方。
+
+权重（checkpoint-25/100/200/228，约 44GB）已删。保留 [`logs/`](../archive/outputs/poc_sft3900_real_hotword_prompt_ft/logs/)、[`eval/`](../archive/outputs/poc_sft3900_real_hotword_prompt_ft/eval/)、[`eval_hotword_context_probe/summary.md`](../outputs/eval_hotword_context_probe/summary.md)。
 
 ## 5. GRPO 数据挖掘
 
-挖掘实现为 [`tools/mine_qwen3_asr_grpo_data.py`](../tools/mine_qwen3_asr_grpo_data.py)，产物在 [`grpo_g16_mining`](../outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining)。每个候选音频使用同一 prompt/audio evidence 生成 16 条 rollout，使用 ground-truth text 计算 WER，并根据 mean/best/std/worst 分桶。
+挖掘实现为 [`tools/mine_qwen3_asr_grpo_data.py`](../tools/mine_qwen3_asr_grpo_data.py)，产物在 [`grpo_g16_mining`](../archive/outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining)。每个候选音频使用同一 prompt/audio evidence 生成 16 条 rollout，使用 ground-truth text 计算 WER，并根据 mean/best/std/worst 分桶。
 
-完整挖掘报告 [`mining_report.jsonl`](../outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining/mining_report.jsonl) 共 25,667 条：
+完整挖掘报告 [`mining_report.jsonl`](../archive/outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining/mining_report.jsonl) 共 25,667 条：
 
 | 类别 | 数量 | 解释 |
 |---|---:|---|
@@ -162,7 +176,7 @@
 | Recoverable | 285 | mean WER 高但 best WER 低，最适合 GRPO |
 | Consistently wrong | 70 | best WER 高且方差低，GRPO 信号弱 |
 
-按音频路径区分，真实域有 4,118 条，合成域有 21,549 条。最终用于全量 GRPO 的去重清单为 [`train_recoverable_unstable_catastrophic_mixed_dedup.jsonl`](../outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining/train_recoverable_unstable_catastrophic_mixed_dedup.jsonl)，训练日志记录为 12,196 条。
+按音频路径区分，真实域有 4,118 条，合成域有 21,549 条。最终用于全量 GRPO 的去重清单为 [`train_recoverable_unstable_catastrophic_mixed_dedup.jsonl`](../archive/outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining/train_recoverable_unstable_catastrophic_mixed_dedup.jsonl)，训练日志记录为 12,196 条。
 
 挖掘结果验证了：Easy 占多数是正常现象；Mixed 是边界样本和轻度不稳定样本的集合；合成音频的 catastrophic 类别显著多于真实域，不能未经筛选直接作为 RL 信号。
 
@@ -221,6 +235,10 @@ GRPO 实现为 [`finetuning/qwen3_asr_grpo.py`](../finetuning/qwen3_asr_grpo.py)
 - 真实域 raw + denoised：保留 checkpoint-75（更新归一化重测 15.63%）与 checkpoint-125（旧归一化最佳 9.17%，两种口径最佳点不同，均保留）；删除 100/150/175/189（189 为未评测的最终 step）。
 
 各保留 checkpoint 的评测 summary 与 predictions 完整保留在对应 `eval/` 目录。
+
+### 2026-09-21 非主线归档
+
+将已定论、不再与 plus0821 SFT-3900 / GRPO 竞争的配方移到 [`archive/`](../archive/README.md)：早期 TCGA/v2/real-only/2voice/fullvoice-without-0821、prompt 热词负结果、soup 插值、GRPO smoke/screen。根目录只留 plus0821 `checkpoint-3900`、GRPO v1/v2 权重，以及长音频评测。
 
 ## 9. 后续建议
 

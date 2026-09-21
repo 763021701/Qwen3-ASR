@@ -1,8 +1,8 @@
 {
   "meta": {
     "purpose": "Keyword and phrase inventory from real HK pathology dictation for TTS/synthesis coverage.",
-    "train_manifest": "data/poc_train_real_raw_denoised/train.jsonl",
-    "dev_manifest": "data/poc_train_real_raw_denoised/dev.jsonl",
+    "train_manifest": "archive/data/poc_train_real_raw_denoised/train.jsonl",
+    "dev_manifest": "archive/data/poc_train_real_raw_denoised/dev.jsonl",
     "test_manifest": "raw/POC_test/metadata.jsonl",
     "n_unique_texts": {
       "train": 898,

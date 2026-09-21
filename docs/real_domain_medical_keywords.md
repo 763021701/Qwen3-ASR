@@ -4,7 +4,7 @@
 
 | 划分 | 清单 | 独立文本 | 病例组 |
 |---|---|---:|---|
-| train | `data/poc_train_real_raw_denoised/train.jsonl` | 898 | 13229, 13247, 13290, 13373, 13488, Sample1–10（不含 13297/13342） |
+| train | `archive/data/poc_train_real_raw_denoised/train.jsonl` | 898 | 13229, 13247, 13290, 13373, 13488, Sample1–10（不含 13297/13342） |
 | dev | 同目录 `dev.jsonl` | 288 | **13297, 13342**（甲状腺、staple line 主要在这里） |
 | test | `raw/POC_test/metadata.jsonl` | 53 | 12009, 12712, 26SS11678, 26SS11731, 26SS12082, 26SS12099 |
 
