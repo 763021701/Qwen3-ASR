@@ -1,0 +1,32 @@
+run_name: pathology_en_sft
+
+dataset:
+  source_type: pathology_en_jsonl
+  source: /root/autodl-tmp/workspace/project/Scrape_Hear_and_Refine/data_pathology_en/final/high_quality/manifest.jsonl
+  language: English
+  output_dir: data/pathology_en
+  check_audio: 1
+  split_seed: 42
+  train_ratio: 0.95
+  dev_ratio: 0.05
+
+training:
+  model_path: Qwen/Qwen3-ASR-1.7B
+  output_dir: outputs/pathology_en_sft
+  batch_size: 2
+  grad_acc: 8
+  lr: 2e-5
+  epochs: 2
+  save_steps: 1000
+  save_total_limit: 3
+  log_steps: 50
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 4
+  augment: 0
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

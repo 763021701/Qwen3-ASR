@@ -1,0 +1,33 @@
+# Medical TTS synthesized speech SFT — 1 epoch
+# Language: English
+# Data: Medical-Speech-Synthesis/outputs/synthesized (TTS, ~50k utterances)
+
+run_name: medical_tts_sft
+
+dataset:
+  source_type: medical_tts
+  metadata_csv: /root/autodl-tmp/workspace/project/Medical-Speech-Synthesis/outputs/synthesized/metadata.csv
+  language: English
+  output_dir: data/medical_tts
+  train_ratio: 0.95
+  split_seed: 42
+
+training:
+  model_path: Qwen/Qwen3-ASR-1.7B
+  output_dir: outputs/medical_tts_sft
+  batch_size: 2
+  grad_acc: 8
+  lr: 2e-5
+  epochs: 1
+  save_steps: 500
+  save_total_limit: 2
+  log_steps: 50
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 4
+  augment: 0
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  dry_run: false
