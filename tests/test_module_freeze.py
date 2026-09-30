@@ -153,6 +153,52 @@ class LoraScopeTest(unittest.TestCase):
         self.assertIsNotNone(rx.fullmatch("model.layers.0.self_attn.q_proj"))
         self.assertIsNone(rx.fullmatch("audio_tower.layers.0.self_attn.q_proj"))
 
+    def test_encoder_scopes_cover_all_audio_projections(self):
+        projections = (
+            "self_attn.q_proj", "self_attn.k_proj",
+            "self_attn.v_proj", "self_attn.out_proj", "fc1", "fc2",
+        )
+        for scope in ("encoder", "encoder_aligner"):
+            rx = re.compile(self.resolve(scope))
+            for layer in range(24):
+                for projection in projections:
+                    name = f"audio_tower.layers.{layer}.{projection}"
+                    with self.subTest(scope=scope, module=name):
+                        self.assertIsNotNone(rx.fullmatch(name))
+            self.assertIsNone(rx.fullmatch("model.layers.0.self_attn.q_proj"))
+            self.assertIsNone(rx.fullmatch("lm_head"))
+            for projection in ("conv_out", "proj1", "proj2"):
+                self.assertEqual(
+                    rx.fullmatch(f"audio_tower.{projection}") is not None,
+                    scope == "encoder_aligner",
+                )
+
+    def test_last_four_encoder_scope_excludes_earlier_layers(self):
+        rx = re.compile(self.resolve("encoder_b4_aligner"))
+        projections = (
+            "self_attn.q_proj", "self_attn.k_proj",
+            "self_attn.v_proj", "self_attn.out_proj", "fc1", "fc2",
+        )
+        for layer in range(24):
+            for projection in projections:
+                name = f"audio_tower.layers.{layer}.{projection}"
+                with self.subTest(module=name):
+                    self.assertEqual(rx.fullmatch(name) is not None, layer >= 20)
+        for projection in ("conv_out", "proj1", "proj2"):
+            self.assertIsNotNone(rx.fullmatch(f"audio_tower.{projection}"))
+        self.assertIsNone(rx.fullmatch("model.layers.0.self_attn.q_proj"))
+
+    def test_encoder_llm_combination_includes_feed_forward(self):
+        rx = re.compile(self.resolve("encoder,llm"))
+        for name in (
+            "audio_tower.layers.0.fc1", "audio_tower.layers.23.fc2",
+            "audio_tower.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.q_proj", "model.layers.0.mlp.down_proj",
+        ):
+            with self.subTest(module=name):
+                self.assertIsNotNone(rx.fullmatch(name))
+        self.assertIsNone(rx.fullmatch("audio_tower.proj1"))
+
     def test_invalid_part_raises(self):
         with self.assertRaises(ValueError):
             self.resolve("aligner,bogus")

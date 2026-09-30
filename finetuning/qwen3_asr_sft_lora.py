@@ -42,31 +42,29 @@ else:
     from nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
     from processor_collate import build_processor_batch_inputs
 
+# Audio attention projections live in self_attn; fc1/fc2 are direct layer children.
 LORA_TARGETS = {
-    "encoder": r"^audio_tower\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$",
+    "encoder": r"^audio_tower\.layers\.\d+\.(?:self_attn\.(?:q_proj|k_proj|v_proj|out_proj)|fc1|fc2)$",
     "aligner": r"^audio_tower\.(conv_out|proj1|proj2)$",
     "encoder_aligner": (
         r"^(audio_tower\.(conv_out|proj1|proj2)$"
-        r"|audio_tower\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$)"
+        r"|audio_tower\.layers\.\d+\.(?:self_attn\.(?:q_proj|k_proj|v_proj|out_proj)|fc1|fc2)$)"
     ),
     "encoder_b4_aligner": (
         r"^(audio_tower\.(conv_out|proj1|proj2)$"
-        r"|audio_tower\.layers\.(20|21|22|23)\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$)"
+        r"|audio_tower\.layers\.(20|21|22|23)\.(?:self_attn\.(?:q_proj|k_proj|v_proj|out_proj)|fc1|fc2)$)"
     ),
     "llm": r"^model\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
-    "all": (
-        r"^(audio_tower\.(conv_out|proj1|proj2)$"
-        r"|audio_tower\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|out_proj|fc1|fc2)$"
-        r"|model\.layers\.\d+\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$)"
-    ),
+    "all": "all-linear",
 }
 
 def _resolve_lora_scope(scope: str) -> str:
-    """Resolve --lora_scope to a single target regex.
+    """Resolve --lora_scope to a target regex or PEFT's ``all-linear``.
 
-    Accepts a legacy scope name or a comma-separated combination of scope
-    names (e.g. ``"aligner,llm"``); the result is the union of their regexes.
-    Parts without LoRA stay fully frozen (base weights are always frozen).
+    Accepts a scope name or a comma-separated combination of scope names
+    (e.g. ``"aligner,llm"``); named parts are combined as a regex union.
+    ``all`` takes precedence and delegates linear-layer selection and output-head
+    exclusions to PEFT. Parts without LoRA stay fully frozen.
     """
     tokens = [t.strip() for t in scope.split(",") if t.strip()]
     if not tokens:
@@ -76,7 +74,7 @@ def _resolve_lora_scope(scope: str) -> str:
         if token not in LORA_TARGETS:
             raise ValueError(f"Unknown lora_scope part {token!r}. Choices: {', '.join(LORA_TARGETS)}")
         regexes.append(LORA_TARGETS[token])
-    return "|".join(regexes)
+    return LORA_TARGETS["all"] if "all" in tokens else "|".join(regexes)
 
 def patch_outer_forward(model):
     cls = model.__class__
@@ -715,9 +713,10 @@ def parse_args():
     # LoRA (default off)
     p.add_argument("--use_lora", type=int, default=0, choices=(0, 1))
     p.add_argument("--lora_scope", type=str, default="encoder_aligner",
-                   help="LoRA target: legacy scopes (encoder, aligner, encoder_aligner, "
-                        "encoder_b4_aligner, llm, all) or a comma-separated combination "
-                        "of them (e.g. 'aligner,llm'). Parts without LoRA stay frozen.")
+                   help="LoRA target: encoder, aligner, encoder_aligner, "
+                        "encoder_b4_aligner, llm, or all (PEFT all-linear). "
+                        "Comma-separated combinations are supported (e.g. 'aligner,llm'); "
+                        "all takes precedence. Parts without LoRA stay frozen.")
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--lora_alpha", type=int, default=16)
     p.add_argument("--lora_dropout", type=float, default=0.05)
