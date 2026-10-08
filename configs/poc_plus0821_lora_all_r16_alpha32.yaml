@@ -1,0 +1,77 @@
+dataset:
+  check_audio: 1
+  denoised_jsonl: raw/POC_train/real_target_domain/metadata_denoised.jsonl
+  dev_fraction: 0.2
+  dev_jsonl: data/poc_train_fullvoice_clean_v2synth_yt_plus0821/dev.jsonl
+  language: None
+  output_dir: data/poc_train_fullvoice_clean_v2synth_yt_plus0821
+  raw_jsonl: raw/POC_train/real_target_domain/metadata_raw.jsonl
+  source_type: real_raw_denoised
+  split_seed: 42
+  test_jsonl: data/poc_train_fullvoice_clean_v2synth_yt_plus0821/test.jsonl
+  test_source: raw/POC_test/pathology.jsonl
+  train_jsonl: data/poc_train_fullvoice_clean_v2synth_yt_plus0821/train.jsonl
+  use_test_as_dev: 1
+  validation_language: ''
+evaluation:
+  batch_size: 2
+  eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py
+  language: ''
+  max_new_tokens: 512
+  model: outputs/poc_plus0821_lora_all_r16_alpha32/merged_best
+  output_dir: outputs/poc_plus0821_lora_all_r16_alpha32/eval
+run_name: poc_plus0821_lora_all_r16_alpha32
+runtime:
+  dry_run: false
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+training:
+  augment: 1
+  augment_prob: 1.0
+  batch_size: 2
+  epochs: 3
+  extra_eval_sets:
+    radiology: raw/POC_test/radiology.csv
+  grad_acc: 16
+  log_steps: 10
+  lr: 2e-5
+  lr_scheduler_type: linear
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  noise_dir: raw/POC_train/noise/noise_target_domain
+  noise_prob: 0.5
+  noise_snr_max: 20.0
+  noise_snr_min: 5.0
+  nospeech_augment: 1
+  nospeech_pad_max_sec: 3.0
+  nospeech_pad_min_sec: 0.5
+  nospeech_prob: 0.3
+  num_workers: 8
+  output_dir: outputs/poc_plus0821_lora_all_r16_alpha32
+  prefetch_factor: 2
+  save_best_metric: cer
+  save_best_total_limit: 3
+  save_steps: 100
+  save_total_limit: 3
+  specaug_freq_mask_param: 27
+  specaug_num_freq_masks: 2
+  specaug_num_time_masks: 2
+  specaug_prob: 0.5
+  specaug_time_mask_param: 50
+  speed_factors: 0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2
+  speed_prob: 0.5
+  sr: 16000
+  strip_target_brackets: 1
+  warmup_ratio: 0.02
+  wer_batch_size: 2
+  wer_eval_samples: 0
+  wer_max_new_tokens: 512
+  use_lora: 1
+  lora_scope: all
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_bias: none
+  lr_encoder: 2e-5
+  lr_aligner: 2e-5
+  lr_llm: 2e-5

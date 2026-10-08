@@ -19,28 +19,29 @@ import argparse
 import os
 import json
 import math
-import random
 import re
 import shutil
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import librosa
-import numpy as np
 import torch
 from datasets import load_dataset
 from qwen_asr import Qwen3ASRModel
 from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
 
+# Share the SFT data recipe and generation metric for controlled comparisons.
 if __package__:
-    from .noise_augmentation import NoiseLibrary, maybe_add_noise
-    from .nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
-    from .processor_collate import build_processor_batch_inputs
+    from .qwen3_asr_sft import (
+        AudioAugmentConfig, DataCollatorForQwen3ASRFinetuning,
+        KeepBestWerCheckpointsCallback, _load_extra_eval_items,
+        make_preprocess_fn_prefix_only,
+    )
 else:
-    from noise_augmentation import NoiseLibrary, maybe_add_noise
-    from nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
-    from processor_collate import build_processor_batch_inputs
+    from qwen3_asr_sft import (
+        AudioAugmentConfig, DataCollatorForQwen3ASRFinetuning,
+        KeepBestWerCheckpointsCallback, _load_extra_eval_items,
+        make_preprocess_fn_prefix_only,
+    )
 
 # Audio attention projections live in self_attn; fc1/fc2 are direct layer children.
 LORA_TARGETS = {
@@ -165,227 +166,6 @@ def find_latest_checkpoint(output_dir: str) -> Optional[str]:
             best_path = path
     return best_path
 
-def load_audio(path: str, sr: int = 16000):
-    wav, _ = librosa.load(path, sr=sr, mono=True)
-    return wav
-
-def build_prefix_messages(prompt: str, audio_array):
-    return [
-        {"role": "system", "content": prompt or ""},
-        {"role": "user", "content": [{"type": "audio", "audio": audio_array}]},
-    ]
-
-def make_preprocess_fn_prefix_only(processor):
-    def _preprocess(ex: Dict[str, Any]) -> Dict[str, Any]:
-        prompt = ex.get("prompt", "")
-        dummy_audio = None
-        prefix_msgs = build_prefix_messages(prompt, dummy_audio)
-        prefix_text = processor.apply_chat_template(
-            [prefix_msgs], add_generation_prompt=True, tokenize=False
-        )[0]
-        return {
-            "prompt": prompt,
-            "audio": ex["audio"],
-            "target": ex["text"],
-            "prefix_text": prefix_text,
-            "aug": ex.get("aug", 1),
-        }
-
-    return _preprocess
-
-def _parse_float_list(value: str, default: Tuple[float, ...]) -> Tuple[float, ...]:
-    raw = (value or "").strip()
-    if not raw:
-        return default
-    return tuple(float(x.strip()) for x in raw.split(",") if x.strip())
-
-@dataclass
-class AudioAugmentConfig:
-    """Optional online augmentation for training only."""
-
-    enabled: bool = False
-    augment_prob: float = 1.0
-    speed_prob: float = 0.5
-    speed_factors: Tuple[float, ...] = (0.9, 1.0, 1.1)
-    noise_prob: float = 0.5
-    noise_snr_min: float = 5.0
-    noise_snr_max: float = 20.0
-    noise_dir: str = ""
-    specaug_prob: float = 0.5
-    specaug_time_mask_param: int = 50
-    specaug_freq_mask_param: int = 27
-    specaug_num_time_masks: int = 2
-    specaug_num_freq_masks: int = 2
-    nospeech: NoSpeechAugmentConfig = field(default_factory=NoSpeechAugmentConfig)
-
-    _specaug_masks: Any = field(default=None, repr=False, compare=False)
-    noise_library: Optional[NoiseLibrary] = field(default=None, repr=False, compare=False)
-
-    def __post_init__(self):
-        if not self.enabled:
-            return
-        try:
-            import torchaudio
-        except ImportError as e:
-            raise ImportError(
-                "Audio augmentation requires torchaudio. Install a build matching your PyTorch, e.g.: "
-                "pip install --no-deps 'torchaudio==2.8.0+cu128' "
-                "--index-url https://download.pytorch.org/whl/cu128"
-            ) from e
-        self.noise_library = NoiseLibrary.from_dir(self.noise_dir)
-        self._specaug_masks = _build_specaug_transforms(self)
-
-    @classmethod
-    def from_args(cls, args: argparse.Namespace) -> "AudioAugmentConfig":
-        return cls(
-            enabled=bool(getattr(args, "augment", 0)),
-            augment_prob=float(getattr(args, "augment_prob", 1.0)),
-            speed_prob=float(getattr(args, "speed_prob", 0.5)),
-            speed_factors=_parse_float_list(
-                getattr(args, "speed_factors", ""), (0.9, 1.0, 1.1)
-            ),
-            noise_prob=float(getattr(args, "noise_prob", 0.5)),
-            noise_snr_min=float(getattr(args, "noise_snr_min", 5.0)),
-            noise_snr_max=float(getattr(args, "noise_snr_max", 20.0)),
-            noise_dir=str(getattr(args, "noise_dir", "") or ""),
-            specaug_prob=float(getattr(args, "specaug_prob", 0.5)),
-            specaug_time_mask_param=int(getattr(args, "specaug_time_mask_param", 50)),
-            specaug_freq_mask_param=int(getattr(args, "specaug_freq_mask_param", 27)),
-            specaug_num_time_masks=int(getattr(args, "specaug_num_time_masks", 2)),
-            specaug_num_freq_masks=int(getattr(args, "specaug_num_freq_masks", 2)),
-            nospeech=NoSpeechAugmentConfig.from_args(args),
-        )
-
-def _build_specaug_transforms(cfg: AudioAugmentConfig):
-    import torchaudio
-
-    time_masks = [
-        torchaudio.transforms.TimeMasking(cfg.specaug_time_mask_param)
-        for _ in range(cfg.specaug_num_time_masks)
-    ]
-    freq_masks = [
-        torchaudio.transforms.FrequencyMasking(cfg.specaug_freq_mask_param)
-        for _ in range(cfg.specaug_num_freq_masks)
-    ]
-    return time_masks, freq_masks
-
-def apply_speed_perturbation(wav: np.ndarray, sr: int, factor: float) -> np.ndarray:
-    """Change playback speed via resample (factor>1 faster/shorter, factor<1 slower/longer)."""
-    if factor == 1.0:
-        return wav
-    import torchaudio
-
-    w = torch.from_numpy(wav).float().unsqueeze(0)
-    # factor>1 => faster => fewer samples when interpreted at ``sr``
-    new_sr = max(1, int(round(sr / factor)))
-    out = torchaudio.functional.resample(w, sr, new_sr)
-    return out.squeeze(0).numpy().astype(np.float32)
-
-def augment_waveform(
-    wav: np.ndarray, sr: int, cfg: AudioAugmentConfig, rng: random.Random
-) -> np.ndarray:
-    if not cfg.enabled or rng.random() > cfg.augment_prob:
-        return wav
-    out = wav.astype(np.float32, copy=False)
-    if rng.random() < cfg.speed_prob:
-        factor = rng.choice(cfg.speed_factors)
-        out = apply_speed_perturbation(out, sr, factor)
-    out = maybe_add_noise(
-        out,
-        sr,
-        rng,
-        prob=cfg.noise_prob,
-        snr_min=cfg.noise_snr_min,
-        snr_max=cfg.noise_snr_max,
-        library=cfg.noise_library,
-    )
-    return out
-
-def apply_specaugment(features: torch.Tensor, cfg: AudioAugmentConfig, rng: random.Random) -> torch.Tensor:
-    """Mask mel features; expects shape (batch, n_mels, time) or (n_mels, time)."""
-    if not cfg.enabled or cfg._specaug_masks is None or rng.random() > cfg.specaug_prob:
-        return features
-    time_masks, freq_masks = cfg._specaug_masks
-    out = features.clone()
-    if out.dim() == 2:
-        for fm in freq_masks:
-            out = fm(out)
-        for tm in time_masks:
-            out = tm(out)
-        return out
-    for i in range(out.size(0)):
-        sample = out[i]
-        for fm in freq_masks:
-            sample = fm(sample)
-        for tm in time_masks:
-            sample = tm(sample)
-        out[i] = sample
-    return out
-
-@dataclass
-class DataCollatorForQwen3ASRFinetuning:
-    processor: Any
-    sampling_rate: int = 16000
-    augment: Optional[AudioAugmentConfig] = None
-
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        audio_paths = [f["audio"] for f in features]
-        prefix_texts = [f["prefix_text"] for f in features]
-        targets = [f["target"] for f in features]
-
-        cfg = self.augment
-        use_aug = cfg is not None and cfg.enabled
-        rng = random.Random() if use_aug else None
-
-        audios = [load_audio(p, sr=self.sampling_rate) for p in audio_paths]
-        aug_flags = [int(f.get("aug", 1)) for f in features]
-
-        if use_aug and cfg.nospeech.enabled:
-            audios, targets = apply_nospeech_augment(
-                audios,
-                targets,
-                aug_flags,
-                rng,
-                cfg.nospeech,
-                self.sampling_rate,
-            )
-
-        eos = self.processor.tokenizer.eos_token or ""
-        full_texts = [pfx + tgt + eos for pfx, tgt in zip(prefix_texts, targets)]
-
-        if use_aug:
-            audios = [
-                augment_waveform(wav, self.sampling_rate, cfg, rng)
-                if aug == 1
-                else wav
-                for wav, aug in zip(audios, aug_flags)
-            ]
-
-        full_inputs, prefix_inputs = build_processor_batch_inputs(
-            self.processor, full_texts, prefix_texts, audios
-        )
-
-        if use_aug and "input_features" in full_inputs:
-            feats = full_inputs["input_features"]
-            for i, feat in enumerate(features):
-                if int(feat.get("aug", 1)) == 1:
-                    feats[i] = apply_specaugment(feats[i], cfg, rng)
-
-        prefix_lens = prefix_inputs["attention_mask"].sum(dim=1).tolist()
-        labels = full_inputs["input_ids"].clone()
-        # The processor may left-pad (real tokens right-aligned), so the prefix
-        # does NOT start at position 0. Mask the prefix at the first real token,
-        # and mask all padding via attention_mask (the pad token may be
-        # <|audio_pad|>, not pad_token_id, so an id-based mask would miss it).
-        attn = full_inputs["attention_mask"]
-        starts = (attn == 1).long().argmax(dim=1).tolist()
-        for i, (pl, st) in enumerate(zip(prefix_lens, starts)):
-            labels[i, st : st + pl] = -100
-        labels[attn == 0] = -100
-
-        full_inputs["labels"] = labels
-        return full_inputs
-
 class CastFloatInputsTrainer(Trainer):
     def __init__(self, *args, eval_data_collator=None, lr_encoder=2e-5, lr_aligner=2e-5,
                  lr_llm=2e-5, **kwargs):
@@ -471,11 +251,8 @@ class CastFloatInputsTrainer(Trainer):
                     print("[optimizer] %-7s: %d params  lr=%.1e"
                           % (name, sum(p.numel() for p in params), lrs[name]))
 
-        self.optimizer = torch.optim.AdamW(
-            optim_groups,
-            betas=(self.args.adam_beta1, self.args.adam_beta2),
-            eps=self.args.adam_epsilon,
-        )
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args, self.model)
+        self.optimizer = optimizer_cls(optim_groups, **optimizer_kwargs)
         return self.optimizer
 
 def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
@@ -646,10 +423,13 @@ def parse_args():
     p.add_argument("--model_path", type=str, default="Qwen/Qwen3-ASR-1.7B")
     p.add_argument("--train_file", type=str, default="train.jsonl")
     p.add_argument("--eval_file", type=str, default="")
+    p.add_argument("--extra_eval_set", action="append", default=[],
+                   help="Additional reporting set as NAME=PATH (jsonl/csv).")
     p.add_argument("--output_dir", type=str, default="./qwen3-asr-finetuning-out")
 
     # Audio
     p.add_argument("--sr", type=int, default=16000)
+    p.add_argument("--strip_target_brackets", type=int, default=0, choices=(0, 1))
 
     # Train hyper-params
     p.add_argument("--batch_size", type=int, default=32)
@@ -674,8 +454,14 @@ def parse_args():
         "--save_best_total_limit",
         type=int,
         default=0,
-        help="When >0 with --eval_file, retain only this many checkpoints with the lowest eval_loss.",
+        help="When >0 with --eval_file, retain this many checkpoints by --save_best_metric.",
     )
+    p.add_argument("--save_best_metric", default="eval_loss",
+                   choices=("eval_loss", "wer", "cer"))
+    p.add_argument("--wer_eval_samples", type=int, default=400,
+                   help="Dev subset size for generation selection; 0 uses all samples.")
+    p.add_argument("--wer_batch_size", type=int, default=4)
+    p.add_argument("--wer_max_new_tokens", type=int, default=512)
     p.add_argument("--early_stopping_patience", type=int, default=0)
     p.add_argument("--early_stopping_threshold", type=float, default=0.0)
 
@@ -743,6 +529,7 @@ def main():
         args_cli.model_path,
         dtype=torch.bfloat16 if use_bf16 else torch.float16,
         device_map=None,
+        max_new_tokens=args_cli.wer_max_new_tokens,
     )
     model = asr_wrapper.model
     processor = asr_wrapper.processor
@@ -769,7 +556,7 @@ def main():
         for split, raw_split in raw_ds.items()
     }
 
-    keep = {"prompt", "audio", "target", "prefix_text", "aug"}
+    keep = {"prompt", "audio", "target", "prefix_text", "aug", "noise_aug"}
     for split in ds.keys():
         drop = [c for c in ds[split].column_names if c not in keep]
         if drop:
@@ -780,16 +567,20 @@ def main():
         processor=processor,
         sampling_rate=args_cli.sr,
         augment=augment_cfg if augment_cfg.enabled else None,
+        strip_target_brackets=bool(args_cli.strip_target_brackets),
     )
     eval_collator = DataCollatorForQwen3ASRFinetuning(
         processor=processor,
         sampling_rate=args_cli.sr,
         augment=None,
+        strip_target_brackets=bool(args_cli.strip_target_brackets),
     )
 
     keep_best_limit = args_cli.save_best_total_limit if args_cli.eval_file else 0
     if args_cli.save_best_total_limit > 0 and not args_cli.eval_file:
         raise ValueError("--save_best_total_limit requires --eval_file")
+    if args_cli.save_best_metric in {"wer", "cer"} and not args_cli.eval_file:
+        raise ValueError("--save_best_metric wer/cer requires --eval_file")
 
     training_args = TrainingArguments(
         output_dir=args_cli.output_dir,
@@ -820,7 +611,22 @@ def main():
 
     callbacks = [MakeEveryCheckpointInferableCallback(base_model_path=args_cli.model_path)]
     if keep_best_limit > 0:
-        callbacks.append(KeepBestCheckpointsCallback(limit=keep_best_limit))
+        if args_cli.save_best_metric in {"wer", "cer"}:
+            callbacks.append(KeepBestWerCheckpointsCallback(
+                limit=keep_best_limit,
+                asr_wrapper=asr_wrapper,
+                eval_dataset=ds.get("validation"),
+                sr=args_cli.sr,
+                wer_eval_samples=args_cli.wer_eval_samples,
+                wer_batch_size=args_cli.wer_batch_size,
+                metric=args_cli.save_best_metric,
+                output_dir=args_cli.output_dir,
+                extra_eval_sets=[
+                    _load_extra_eval_items(spec) for spec in args_cli.extra_eval_set
+                ],
+            ))
+        else:
+            callbacks.append(KeepBestCheckpointsCallback(limit=keep_best_limit))
     if args_cli.early_stopping_patience > 0:
         if not args_cli.eval_file:
             raise ValueError("--early_stopping_patience requires --eval_file")
