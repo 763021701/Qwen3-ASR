@@ -1,0 +1,74 @@
+run_name: poc_tts_radiology_ep1_synthonly
+
+# ep1 (MOSS voice) synth-only oracle, 2026-10-27.
+# Same 4,001 radiology texts as RAD_slref/RADP_pathref but a NEW TTS voice
+# (CosyVoice data_radiology_moss/synth/ep1, 7.60h, 24kHz). 0/4,001 texts overlap the
+# holdout19 (only discourse markers). Question: does this voice transfer better to REAL
+# recordings than the old voices (which scored 170-182% on holdout19)?
+# Recipe identical to the previous synth-only oracle: from BASE, full-param SFT,
+# bs2 x ga16, lr 2e-5, warmup 0.02, 3 epochs (378 updates), speed 0.8-1.2 p=0.5 +
+# SpecAug 0.5, noise = radiology background, nospeech on, no checkpoint selection.
+# New-label references throughout. Baselines (new-label): base holdout19 76.46%,
+# champion 64.30%, real-data oracle v2 55.19-57.22%, old synth-only 170-182%.
+dataset:
+  source_type: radiology_synth
+  language: "None"
+  validation_language: ""
+  output_dir: data/poc_train_tts_radiology_ep1_synthonly
+  train_jsonl: data/poc_train_tts_radiology_ep1_synthonly/train.jsonl
+  dev_jsonl: data/poc_radiology_oracle/holdout.jsonl
+  test_jsonl: data/poc_radiology_oracle/holdout.jsonl
+  check_audio: 1
+
+training:
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_tts_radiology_ep1_synthonly
+  batch_size: 2
+  grad_acc: 16
+  lr: 2e-5
+  lr_scheduler_type: linear
+  warmup_ratio: 0.02
+  epochs: 3
+  save_steps: 126
+  save_total_limit: 4
+  save_best_total_limit: 0
+  save_best_metric: eval_loss
+  wer_eval_samples: 0
+  wer_batch_size: 2
+  wer_max_new_tokens: 512
+  log_steps: 10
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 2
+  strip_target_brackets: 1
+  augment: 1
+  augment_prob: 1.0
+  speed_prob: 0.5
+  speed_factors: "0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2"
+  noise_prob: 0.5
+  noise_snr_min: 5.0
+  noise_snr_max: 20.0
+  noise_dir: raw/POC_train/noise/noise_target_domain/noise_from_radiology
+  specaug_prob: 0.5
+  specaug_time_mask_param: 50
+  specaug_freq_mask_param: 27
+  specaug_num_time_masks: 2
+  specaug_num_freq_masks: 2
+  nospeech_augment: 1
+  nospeech_prob: 0.3
+  nospeech_pad_min_sec: 0.5
+  nospeech_pad_max_sec: 3.0
+
+evaluation:
+  eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py
+  model: outputs/poc_tts_radiology_ep1_synthonly/checkpoint-378
+  language: ""
+  output_dir: outputs/poc_tts_radiology_ep1_synthonly/eval_holdout
+  batch_size: 4
+  max_new_tokens: 512
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

@@ -1,0 +1,66 @@
+run_name: poc_radiology_mix_m1_halfep
+
+# M1 at HALF epoch: best M1 checkpoint was step 600/1210, so train 605 steps with the
+# linear schedule decaying to zero by the end instead of continuing at high LR.
+# 38,723 rows, 0.5 epoch, bs2 x ga16 -> 605 updates; from BASE, E4 recipe.
+# Real clips: raw/POC_train/real_target_domain (raw + denoised + 0821), no eval overlap.
+
+dataset:
+  source_type: radiology_sim
+  language: "None"
+  validation_language: ""
+  output_dir: data/poc_train_radiology_mix_m1
+  train_jsonl: data/poc_train_radiology_mix_m1/train.jsonl
+  dev_jsonl: data/poc_radiology_oracle/holdout.jsonl
+  test_jsonl: data/poc_radiology_oracle/holdout.jsonl
+  check_audio: 1
+
+training:
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_radiology_mix_m1_halfep
+  batch_size: 2
+  grad_acc: 16
+  lr: 2e-5
+  lr_scheduler_type: linear
+  warmup_ratio: 0.02
+  epochs: 0.5
+  save_steps: 120
+  save_total_limit: 6
+  save_best_total_limit: 0
+  save_best_metric: eval_loss
+  wer_eval_samples: 0
+  wer_batch_size: 2
+  wer_max_new_tokens: 512
+  log_steps: 10
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 2
+  strip_target_brackets: 1
+  augment: 1
+  augment_prob: 1.0
+  speed_prob: 0.5
+  speed_factors: "0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2"
+  noise_prob: 0.0
+  specaug_prob: 0.5
+  specaug_time_mask_param: 50
+  specaug_freq_mask_param: 27
+  specaug_num_time_masks: 2
+  specaug_num_freq_masks: 2
+  nospeech_augment: 1
+  nospeech_prob: 0.3
+  nospeech_pad_min_sec: 0.5
+  nospeech_pad_max_sec: 3.0
+
+evaluation:
+  eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py
+  model: outputs/poc_radiology_mix_m1_halfep/checkpoint-605
+  language: ""
+  output_dir: outputs/poc_radiology_mix_m1_halfep/eval_holdout
+  batch_size: 4
+  max_new_tokens: 512
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

@@ -1,0 +1,77 @@
+run_name: poc_tts_radiology_synthonly_fromscratch
+
+# Synth-only oracle (2026-10-23): the exact counterpart of the real-data radiology
+# oracle (archive/outputs/poc_radiology_oracle_5ep). Train from BASE on tts_radiology
+# alone (8,002 CosyVoice rows, 4,001 texts x 2 voices, 16.7h), 3 epochs, mainline
+# optimizer settings (lr 2e-5, eff batch 32). Question: with a LARGE model update from
+# pure synthetic radiology speech, does real-recording eval (holdout19) improve?
+# Baselines on holdout19: base 78.18% WER / champion 67.73% / oracle-real-5ep 75.45%
+# (stable-17 61.88%).
+# dev = the real holdout19 ONLY as eval_loss monitor; no checkpoint selection is done
+# (save_best_total_limit=0) so the endpoint + per-epoch checkpoints are all evaluated.
+# Online noise = RADIOLOGY-derived background (user decision 2026-10-23): the 182
+# non-speech segments extracted from the radiology recordings themselves, so synthetic
+# speech is noised with the target environment. Caveat: median 0.62s files get tiled to
+# clip length (periodic artifacts are the known short-noise issue).
+dataset:
+  source_type: radiology_synth
+  language: "None"
+  validation_language: ""
+  output_dir: data/poc_train_tts_radiology_synthonly
+  train_jsonl: data/poc_train_tts_radiology_synthonly/train.jsonl
+  dev_jsonl: archive/data/poc_radiology_oracle/holdout.jsonl
+  test_jsonl: archive/data/poc_radiology_oracle/holdout.jsonl
+  check_audio: 1
+
+training:
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_tts_radiology_synthonly_fromscratch
+  batch_size: 2
+  grad_acc: 16
+  lr: 2e-5
+  lr_scheduler_type: linear
+  warmup_ratio: 0.02
+  epochs: 3
+  save_steps: 250
+  save_total_limit: 4
+  save_best_total_limit: 0
+  save_best_metric: eval_loss
+  wer_eval_samples: 0
+  wer_batch_size: 2
+  wer_max_new_tokens: 512
+  log_steps: 10
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 2
+  strip_target_brackets: 1
+  augment: 1
+  augment_prob: 1.0
+  speed_prob: 0.5
+  speed_factors: "0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2"
+  noise_prob: 0.5
+  noise_snr_min: 5.0
+  noise_snr_max: 20.0
+  noise_dir: raw/POC_train/noise/noise_target_domain/noise_from_radiology
+  specaug_prob: 0.5
+  specaug_time_mask_param: 50
+  specaug_freq_mask_param: 27
+  specaug_num_time_masks: 2
+  specaug_num_freq_masks: 2
+  nospeech_augment: 1
+  nospeech_prob: 0.3
+  nospeech_pad_min_sec: 0.5
+  nospeech_pad_max_sec: 3.0
+
+evaluation:
+  eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py
+  model: outputs/poc_tts_radiology_synthonly_fromscratch/checkpoint-753
+  language: ""
+  output_dir: outputs/poc_tts_radiology_synthonly_fromscratch/eval_holdout
+  batch_size: 4
+  max_new_tokens: 512
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

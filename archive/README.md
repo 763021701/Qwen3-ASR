@@ -25,3 +25,19 @@ Moved concluded, non-competitive POC SFT/eval after plus0821 became the working 
 - Negative prompt-hotword continue-SFT from 3900 (`poc_sft3900_real_hotword_prompt_ft`; weights already deleted)
 - Soup interpolations with base, GRPO smoke/screen/baseline logs
 - Matching `data/` manifests and eval directories
+
+## 2026-10-21
+
+- Radiology-only oracle SFT (1 epoch + 5 epochs), diagnostic for whether target-domain
+  data teaches the radiology scene. Configs, manifests, checkpoints and eval results
+  moved from the repo root; `tools/prepare_radiology_oracle.py` stays in `tools/`.
+  Results: `outputs/poc_radiology_oracle_5ep/RESULTS.md` and
+  `outputs/poc_radiology_oracle_5ep/epoch_summary.json`.
+
+## 2026-10-22
+
+Conservative output cleanup (~116GB freed): removed redundant checkpoints only, keeping
+one model per experiment and all optimizer states. Deletions: yue run 1300/1900/4557,
+radiology oracle 5ep 76/152/228/304, radiology oracle 1ep weights, historical 2voice
+checkpoint, old Uyghur/OPD checkpoints, LoRA merged_best and non-selected adapters,
+and the LoRA preflight directory.

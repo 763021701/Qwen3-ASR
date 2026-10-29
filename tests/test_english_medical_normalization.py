@@ -13,6 +13,15 @@ class EnglishMedicalNormalizationTest(unittest.TestCase):
         self.assertEqual(normalize_english("一點五 cm"), normalize_english("1.5 cm"))
         self.assertEqual(normalize_english("二零零八"), normalize_english("2008"))
 
+    def test_leading_zero_digit_strings_preserved(self):
+        # Radiology case IDs are spoken digit-by-digit; leading zeros must survive.
+        self.assertEqual(normalize_english("零二三九三二七"), "0239327")
+        self.assertEqual(normalize_english("零零三五六七七"), "0035677")
+        self.assertEqual(normalize_english("零二三九三二七"), normalize_english("0239327"))
+        # Value readings starting mid-number must NOT be treated as digit strings.
+        self.assertEqual(normalize_english("二零二六"), "2026")
+        self.assertEqual(normalize_english("一點零三 cm"), "1.03 cm")
+
     def test_english_number_words_match_arabic(self):
         self.assertEqual(normalize_english("two blocks"), normalize_english("2 blocks"))
         self.assertEqual(normalize_english("three paraffin"), normalize_english("3 paraffin"))

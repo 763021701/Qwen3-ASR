@@ -1,0 +1,67 @@
+run_name: poc_radiology_oracle_5ep_newlabels
+
+# Re-run of the radiology REAL-data oracle with FIXED labels (2026-10-23).
+# The 2026-10-21/22 oracle (archive/) is void: its references had digit-reading and
+# speaker-prefix errors (fixed in raw/POC_test/radiology.csv on 2026-10-23) and the
+# scorer dropped leading zeros (fixed in evaluation/english_medical/text_normalization.py).
+# Recipe identical to the void 5-epoch oracle: from base, full-param SFT, bs=1/grad_acc=1
+# (76 updates/epoch), lr 2e-5, linear, warmup 0.02, 5 epochs (380 updates), speed 0.8-1.2
+# p=0.5 + SpecAug p=0.5, no noise, no nospeech, no checkpoint selection; one ckpt/epoch.
+# Eval = new-label manifests only. Reference points (new-label scoring, from
+# outputs/eval_radiology_oracle_sets/rescore_2026-10-23.json): base holdout19 76.46%,
+# champion 64.30%, old-label void oracle 76.71%.
+dataset:
+  source_type: radiology_csv
+  language: "None"
+  output_dir: data/poc_radiology_oracle
+  train_jsonl: data/poc_radiology_oracle/train.jsonl
+  dev_jsonl: data/poc_radiology_oracle/holdout.jsonl
+  test_jsonl: data/poc_radiology_oracle/holdout.jsonl
+  check_audio: 1
+
+training:
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_radiology_oracle_5ep_newlabels
+  batch_size: 1
+  grad_acc: 1
+  lr: 2e-5
+  lr_scheduler_type: linear
+  warmup_ratio: 0.02
+  epochs: 5
+  save_steps: 76
+  save_total_limit: 5
+  save_best_total_limit: 0
+  save_best_metric: eval_loss
+  wer_eval_samples: 0
+  wer_batch_size: 2
+  wer_max_new_tokens: 512
+  log_steps: 10
+  sr: 16000
+  num_workers: 4
+  prefetch_factor: 2
+  strip_target_brackets: 1
+  augment: 1
+  augment_prob: 1.0
+  speed_prob: 0.5
+  speed_factors: "0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2"
+  noise_prob: 0.0
+  specaug_prob: 0.5
+  specaug_time_mask_param: 50
+  specaug_freq_mask_param: 27
+  specaug_num_time_masks: 2
+  specaug_num_freq_masks: 2
+  nospeech_augment: 0
+
+evaluation:
+  eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py
+  model: outputs/poc_radiology_oracle_5ep_newlabels/checkpoint-380
+  language: ""
+  output_dir: outputs/poc_radiology_oracle_5ep_newlabels/eval_holdout
+  batch_size: 4
+  max_new_tokens: 512
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

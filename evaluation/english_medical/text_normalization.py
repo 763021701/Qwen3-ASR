@@ -31,6 +31,25 @@ _WS_RE = re.compile(r"\s+")
 _MULTIPLICATION_SENTINEL = "qwenmultoken"
 _OCLOCK_SENTINEL = "qwenoclock"
 _REPEATED_TWO_SENTINEL = "qwentwotwo"
+
+
+def _num_sentinel(idx: int) -> str:
+    # Letter-only sentinel; digits inside would be split by the alphanumeric
+    # boundary rule before restore.
+    return "qwennum" + chr(97 + (idx // 26) % 26) + chr(97 + idx % 26)
+
+
+# Case IDs are spoken digit-by-digit and may start with 零 ("零二三九三二七" = 0239327).
+# The Chinese number converter drops leading zeros of digit strings (and the English
+# converter would collapse an Arabic "0239327" too), so protect 零-initial digit strings
+# BEFORE conversion by transliterating them digit-by-digit; the left guard keeps value
+# readings (二零二六 = 2026) intact. No pathology label contains 0-prefixed IDs, so
+# historical POC numbers are unaffected; radiology-only scoring changes.
+_LEADING_ZERO_DIGITSTR_CJK_RE = re.compile(
+    r"(?<![點.\d零一二三四五六七八九十百千萬])(零[零一二三四五六七八九]{2,})"
+)
+_CJK_DIGIT_MAP = str.maketrans("零一二三四五六七八九", "0123456789")
+_LEADING_ZERO_DIGITS_RE = re.compile(r"(?<![0-9A-Za-z.])(0[0-9]{2,})(?![0-9A-Za-z.])")
 _MAX_SPELLING_LETTERS = 8
 _PUNCTUATION_WITHOUT_PERIOD = str.maketrans("", "", string.punctuation.replace(".", ""))
 _CLOSED_HYPHENATED_COMPOUNDS = {
@@ -127,7 +146,19 @@ def normalize_english(text: str) -> str:
     s = s.replace("廿", "二十")
     s = _OCLOCK_RE.sub(_OCLOCK_SENTINEL, s)
     s = _REPEATED_TWO_RE.sub(_REPEATED_TWO_SENTINEL, s)
+    num_store: list[str] = []
+
+    def _protect_cjk(match: "re.Match[str]") -> str:
+        num_store.append(match.group(1).translate(_CJK_DIGIT_MAP))
+        return _num_sentinel(len(num_store) - 1)
+
+    def _protect_arabic(match: "re.Match[str]") -> str:
+        num_store.append(match.group(1))
+        return _num_sentinel(len(num_store) - 1)
+
+    s = _LEADING_ZERO_DIGITSTR_CJK_RE.sub(_protect_cjk, s)
     s = _ZH_NUMBER_NORMALIZER.normalize(s)
+    s = _LEADING_ZERO_DIGITS_RE.sub(_protect_arabic, s)
     s = s.replace(_OCLOCK_SENTINEL, " oclock ")
     s = s.replace(_REPEATED_TWO_SENTINEL, " 2 2 ")
     s = s.replace(chr(40), " ").replace(chr(41), " ")
@@ -136,6 +167,8 @@ def normalize_english(text: str) -> str:
     s = _merge_spaced_letters(s)
     s = _EN_NUMBER_NORMALIZER.normalize(s)
     s = _restore_arabic_one(s)
+    for idx, digits in enumerate(num_store):
+        s = s.replace(_num_sentinel(idx), f" {digits} ")
     s = _merge_spaced_letters(s)
     s = _close_spaced_compounds(s)
     s = _normalize_level_roman(s)
