@@ -55,12 +55,25 @@ def main():
     assert mer_tokens("我们用python写demo！") == ["我", "们", "用", "python", "写", "demo"]
     assert mer_tokens("𠮶个人") == ["𠮶", "个", "人"]
     assert clean_transcript("会议定在3点，价格1.5元", "zh") == ("会议定在三点价格一点五元", "ok")
-    assert clean_transcript("I have 3 apples.", "en") == (None, "digits_without_tn")
-    assert clean_transcript("<SIL> Hello, [noise] world <COMMA>", "en") == ("hello world", "ok")
+    assert clean_transcript("佢3点到", "yue") == ("佢三点到", "ok")  # any non-English lang uses Chinese TN
     assert clean_transcript("iPhone 15 发布了", None) == ("iphone 十五发布了", "ok")
+    assert clean_transcript("<SIL> Hello, [noise] world <COMMA>", "en") == ("hello world", "ok")
     assert clean_transcript("", "zh") == ("", "ok")
-    print("[ok] T11 normalize_text (accents folded) / mer_tokens (Ext-B chars) / clean_transcript (Chinese TN, "
-          "English digits dropped, markup removed)")
+    en = {
+        "I have 3 apples.": "i have three apples",
+        "In 1999, 50% of the 1,234 people paid $5.50 for 2 mp3 files on the 21st.":
+            "in nineteen ninety nine fifty percent of the one thousand two hundred and thirty four people paid five "
+            "dollars and fifty cents for two mp three files on the twenty first",
+        "Agent 007 earned $5 million in the 90s.": "agent zero zero seven earned five million dollars in the nineties",
+        "It costs $1, 1.05 kg at 3:30": "it costs one dollar one point zero five kg at three thirty",
+    }
+    for raw, spoken in en.items():
+        assert clean_transcript(raw, "en") == (spoken, "ok"), (raw, clean_transcript(raw, "en"))
+    assert clean_transcript("Mix 1/2 cup", "en") == (None, "digits_without_tn")
+    assert clean_transcript("這個", "zh") == ("這個", "ok")  # traditional -> simplified only on request
+    assert clean_transcript("佢話係囉，嗰個餸幾好食，噚日搵到", "yue", t2s="hk2s") == ("佢话系啰嗰个餸几好食噚日揾到", "ok")
+    print("[ok] T11 normalize_text (accents folded) / mer_tokens (Ext-B chars) / clean_transcript (Chinese TN for "
+          "zh/yue/dialects, English TN via num2words, fractions dropped, markup removed, opt-in OpenCC keeps 嗰喎餸噚)")
 
     tmp = Path(tempfile.mkdtemp())
     synthetic = load_tokenizer(synthetic_sp_model(tmp / "synthetic.model"))

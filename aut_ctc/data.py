@@ -5,13 +5,13 @@ Manifest: JSONL, one utterance per line, e.g.
    "duration": 4.21, "text": "而对楼市成交抑制作用最大的限购", "lang": "zh", "style": "woitn",
    "source": "aishell1", "label_type": "human"}
 ``text`` is the raw transcript; it is normalized at load time so the rules can change later.
+Optional ``"t2s"``: OpenCC config ("hk2s" / "tw2s" / "t2s") for sources written in traditional characters.
 """
 from __future__ import annotations
 
 import json
 import random
 import re
-import warnings
 from collections import Counter
 
 import numpy as np
@@ -27,15 +27,20 @@ from .tokenizer import CJK, normalize_text, to_halfwidth_alnum
 _MARKUP_RE = re.compile(r"<[A-Z_]+>|\[[A-Za-z_ ]+\]")
 _CJK_RE = re.compile(f"[{CJK}]")
 _DIGIT_RE = re.compile(r"\d")
+# OpenCC rewrites these Cantonese characters into rare variants (嗰→𠮶, 喎→㖞, 餸→𩠌, 噚→㖊; the last three are not
+# in the vocab), so they are kept as written.
+_OPENCC_KEEP_RE = re.compile("([嗰喎餸噚])")
+_opencc, _cn_tn = {}, None
 
-try:
-    from opencc import OpenCC
 
-    _t2s = OpenCC("t2s").convert
-except ImportError:  # optional: the pipeline then keeps traditional characters as they are
-    _t2s = None
+def to_simplified(text: str, config: str = "t2s") -> str:
+    """OpenCC traditional -> simplified (config t2s / hk2s / tw2s). For traditional-script sources only: on simplified
+    text it is not a no-op (inside some phrases 坏 becomes 坯 and 沈 becomes 沉)."""
+    if config not in _opencc:
+        from opencc import OpenCC
 
-_cn_tn = None
+        _opencc[config] = OpenCC(config).convert
+    return "".join(p if k % 2 else _opencc[config](p) for k, p in enumerate(_OPENCC_KEEP_RE.split(text)))
 
 
 def _chinese_tn(text: str) -> str:
@@ -47,20 +52,31 @@ def _chinese_tn(text: str) -> str:
     return _cn_tn(text)
 
 
-def clean_transcript(text: str, lang=None, style: str = "woitn") -> tuple[str | None, str]:
+def _english_tn(text: str) -> str:
+    try:
+        from .en_tn import english_tn
+    except ImportError:  # num2words is optional: the digits stay and the sample is dropped
+        return text
+    return english_tn(text) or text
+
+
+def clean_transcript(text: str, lang=None, style: str = "woitn", t2s=None) -> tuple[str | None, str]:
     """Raw transcript -> (normalized text or None, reason).
 
-    TN runs before normalize_text because it needs the punctuation (decimal points, %, dates) that
-    normalize_text removes. Chinese (lang contains "zh", or CJK text when lang is unknown) uses cn_tn;
-    there is no English TN here, so English text that still has digits is dropped (DESIGN §7.2 rule 5).
+    t2s: OpenCC config for traditional-script sources (manifest field "t2s"); None keeps the characters.
+    TN runs before normalize_text because it needs the punctuation (decimal points, %, dates) that normalize_text
+    removes. Text with Han characters, or with a non-English lang (zh, yue, wuyu, ...), uses cn_tn; other text uses
+    en_tn (num2words). Text whose digits cannot be verbalized is dropped (DESIGN §7.2 rule 5).
     """
     text = _MARKUP_RE.sub(" ", text or "")
-    if _t2s is not None:
-        text = _t2s(text)
+    if t2s:
+        text = to_simplified(text, t2s)
     if style == "woitn" and _DIGIT_RE.search(text):
-        chinese = "zh" in lang if lang else bool(_CJK_RE.search(text))
-        if chinese:
-            text = _chinese_tn(to_halfwidth_alnum(text))
+        text = to_halfwidth_alnum(text)
+        if _CJK_RE.search(text) or (lang and not lang.startswith("en")):
+            text = _chinese_tn(text)
+        else:
+            text = _english_tn(text)
     text, has_digit = normalize_text(text, style)
     if style == "woitn" and has_digit:
         return None, "digits_without_tn"
@@ -91,7 +107,7 @@ def prepare_example(ex: dict, tokenizer, style="woitn", min_duration=0.3, max_du
     info = {"duration": utterance_duration(ex), "raw_has_digit": bool(_DIGIT_RE.search(ex.get("text") or ""))}
     if not min_duration <= info["duration"] <= max_duration:
         return None, "duration", info
-    text, reason = clean_transcript(ex.get("text", ""), ex.get("lang"), style)
+    text, reason = clean_transcript(ex.get("text", ""), ex.get("lang"), style, ex.get("t2s"))
     if text is None:
         return None, reason, info
     ids = tokenizer.encode(text)
@@ -124,8 +140,6 @@ class ManifestDataset(Dataset):
 
     def __init__(self, manifests, tokenizer, style="woitn", min_duration=0.3, max_duration=30.0, drop_unk=True,
                  upsample=1, num_queries=0, check_feasible=True, augment=None):
-        if _t2s is None:
-            warnings.warn("opencc is not installed: traditional characters are not converted (DESIGN §7.2 rule 2)")
         self.items, self.sources, self.durations, self.stats = [], [], [], Counter()
         for src, path in enumerate(manifests):
             for ex in load_manifest(path):

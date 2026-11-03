@@ -4,7 +4,7 @@
 
 ## 环境
 
-- conda 环境 `whisperlivekit`（transformers 4.57.6）。该环境装的是 PyPI 版 qwen-asr 0.0.6，**不含**下面的 AuT 窗口修复，所以一律在仓库根目录用 `python -m aut_ctc.…` 运行（cwd 优先于 site-packages）；`frontend.py` 发现导入的不是仓库里的 `qwen_asr` 会直接报错。也可以 `pip install -e .`，但会改变同一环境里 WhisperLiveKit 用到的 qwen_asr。
+- conda 环境 `whisperlivekit`（transformers 4.57.6）。该环境装的是 PyPI 版 qwen-asr 0.0.6，**不含**下面的 AuT 窗口修复，所以一律在仓库根目录用 `python -m aut_ctc.…` 运行（cwd 优先于 site-packages）；`frontend.py` 发现导入的不是仓库里的 `qwen_asr` 会直接报错。也可以 `pip install -e .`，但会改变同一环境里 WhisperLiveKit 用到的 qwen_asr。环境里已装 opencc 1.4.2（繁转简）和 num2words 0.5.14（英文 TN）。
 - `qwen_asr/core/transformers_backend/modeling_qwen3_asr.py`：AuT 的块对角窗口原先只在 flash-attn（`cu_seqlens`）下生效，sdpa/eager 实际是整段全注意力、打包 batch 会串扰；现在显式传入 `_prepare_attention_mask` 的窗口 mask。这也会让本仓库 transformers 后端处理 >8 s 音频时的 LLM 输出向官方（vLLM/FA2）行为靠拢。
 
 ## 用法
@@ -51,8 +51,8 @@ SenseVoiceSmall 词表裁成中英紧凑子集，再补回方言相关的部分�
 | 特征提取 | `Qwen3ASRFeatureExtractor` | checkpoint 自带的 `WhisperFeatureExtractor`，`padding="longest"`、不截断；<0.5 s 补零到 0.5 s；mel 不必补到 100 的倍数 |
 | 短 batch | — | batch 里没有满 1 s 的块时补一条 1 s 静音哑元（独立窗口），使尾块卷积补零与训练一致 |
 | 离线长音频 | >60 s 才用带状注意力 | 离线解码始终传 `local_frames=390`：≤30 s 时与全注意力完全相同，30–60 s 也不会遇到训练外的 RoPE 距离 |
-| TN | 中文 WeTextProcessing、英文 NeMo | 中文用 `cn_tn.py`（从 `ctc` 分支复制）；英文没有 TN，含数字的英文样本丢弃并计数 |
-| 繁转简 | OpenCC t2s | 装了 opencc 才做，否则告警跳过 |
+| TN | 中文 WeTextProcessing、英文 NeMo | 含汉字或 lang 非英文（zh/yue/wuyu…）用 `cn_tn.py`（从 `ctc` 分支复制）；英文用 num2words（`en_tn.py`：金额、百分比、序数、年代、小数、千分位、年份、前导零、词内数字，英式 "and"；"911" 这类依语境的读法和单位缩写不处理）；数字间有斜杠（分数、日期）的样本丢弃并计数 |
+| 繁转简 | OpenCC t2s，统一做 | 按条启用：清单里写 `"t2s": "hk2s"`（或 `t2s`/`tw2s`），只用于繁体来源。对简体文本 OpenCC 不是空操作（个别短语里 坏→坯、沈→沉）；嗰喎餸噚 保持原样（OpenCC 会转成 𠮶㖞𩠌㖊，后三个不在词表） |
 | `sampling_weights` | 按小时数加权 | 每步按权重选清单，等权 = 各清单步数相同 |
 | 词表 | V=19,911，丢弃所有孤立 `▁` | 见上面“词表”一节：+4 个方言标签、+孤立 `▁`（仅在英文词之间）、+29 个方言字，V=19,945 |
 
