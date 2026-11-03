@@ -1,0 +1,10 @@
+# M3 layer probe (DESIGN.md §12.1): merged over base.yaml, run with
+#   python -m aut_ctc.tools.probe_layers --config aut_ctc/configs/base.yaml aut_ctc/configs/probe.yaml --exp_dir exp/probe
+# 100-200 h of zh/en data is enough; one AuT forward feeds an LN+Linear CTC probe per layer.
+probe:
+  layer_ids: [7, 11, 15, 19, 21, -1]   # outputs of layers 8/12/16/20/22 (1-based) and ln_post
+  steps: 8000
+  lr: 1.0e-3
+  warmup_steps: 500
+data:
+  augment: null

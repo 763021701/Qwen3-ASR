@@ -1,0 +1,61 @@
+# AuT-CTC phase 1 (DESIGN.md §14): offline baseline, M4. Paths are for the hmasr_en machine.
+aut:
+  model_dir: /root/autodl-tmp/models/Qwen3-ASR-1.7B
+  dtype: bfloat16
+  attn_implementation: sdpa      # flash_attention_2 when installed; sdpa applies the window mask explicitly
+  layer_ids: [-1]                # decided by the M3 probe (configs/probe.yaml)
+tokenizer:
+  sp_model: /path/to/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model
+  style: woitn
+decoder:
+  d_model: 512
+  n_heads: 8
+  n_layers: 6
+  ffn_mult: 4
+  kernel_size: 9
+  dropout: 0.1
+  inter_ctc_layer: 3
+  tie_cond: true
+  upsample: 1                    # 2 when the M2 report meets the DESIGN §8.4 criterion
+  causal_conv: true              # streaming is required (D2): keep true
+  num_queries: 0
+loss:
+  inter_ctc_weight: 0.3
+optim:
+  lr: 1.0e-3
+  betas: [0.9, 0.98]
+  eps: 1.0e-8
+  weight_decay: 0.01
+  warmup_steps: 5000             # 2000 below ~1k hours of data
+  min_lr: 1.0e-5
+  grad_clip: 5.0
+  bf16: true
+  epochs: 10                     # total_steps = epochs x batches per pass / GPUs
+  total_steps: null              # set to override epochs
+data:
+  train_manifests: [data/train_zh.jsonl, data/train_en.jsonl, data/train_cs.jsonl]
+  sampling_weights: [1.0, 1.0, 1.0]   # per-step manifest probabilities: equal = same share of steps each
+  dev_manifests: [data/dev_zh.jsonl, data/dev_en.jsonl, data/dev_cs.jsonl]
+  min_duration: 0.3
+  max_duration: 30.0
+  drop_unk: true
+  max_batch_seconds: 1200        # padded audio seconds per GPU step; lower it on a shared GPU
+  num_workers: 4
+  augment:
+    speed_perturb: [0.9, 1.0, 1.1]
+    noise_prob: 0.3
+    snr_db: [5, 20]
+    noise_list: null             # text file listing noise wavs (MUSAN noise/music); null = off
+    rir_list: null               # text file listing RIR wavs (RIRS_NOISES); null = off
+    specaug: {freq_masks: 2, freq_width: 20, time_masks: 2, time_width: 40}
+streaming:
+  p_stream: 0.0                  # M4: 0; M5 (stream.yaml): 0.5
+  windows: [100, 200, 400]
+  left_chunks: [2, 4, 8, -1]
+eval:
+  every_steps: 2000
+  max_batch_seconds: 600
+  local_frames: 390              # banded attention in offline decoding: identical to full attention up to 30 s
+log:
+  every_steps: 50
+seed: 0

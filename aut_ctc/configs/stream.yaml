@@ -1,0 +1,8 @@
+# M5 (DESIGN.md §9.3): merged over base.yaml. Continues from the M4 offline checkpoint with dynamic windows:
+# half of the batches use W in {1, 2, 4} s AuT windows and chunk-causal decoder attention of the same W.
+#   python -m aut_ctc.train --config aut_ctc/configs/base.yaml aut_ctc/configs/stream.yaml --exp_dir exp/stream
+init_from: exp/base/ckpt-STEP.pt   # best M4 checkpoint (see exp/base/best.json)
+streaming:
+  p_stream: 0.5
+optim:
+  warmup_steps: 1000

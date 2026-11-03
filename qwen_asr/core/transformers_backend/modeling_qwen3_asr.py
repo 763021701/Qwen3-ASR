@@ -724,11 +724,14 @@ class Qwen3ASRAudioEncoder(Qwen3ASRPreTrainedModel):
             if remainder != 0:
                 cu_chunk_lens += [remainder]
         cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(-1, dtype=torch.int32)
+        # Only FA2 consumes cu_seqlens; sdpa/eager need the block-diagonal window mask passed explicitly.
+        attention_mask = self._prepare_attention_mask(hidden_states, cu_seqlens)
 
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(
                 hidden_states,
                 cu_seqlens,
+                attention_mask=attention_mask,
             )
 
             hidden_states = layer_outputs[0]
