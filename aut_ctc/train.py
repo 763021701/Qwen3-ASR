@@ -89,6 +89,14 @@ def warmup_cosine(warmup: int, total: int, peak: float, min_lr: float):
     return factor
 
 
+def cap_gpu_memory(device, limit_gb) -> None:
+    """Shared GPU: beyond this cap our own allocator raises OOM instead of eating other processes' headroom."""
+    if limit_gb and device.type == "cuda":
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        total = torch.cuda.get_device_properties(index).total_memory
+        torch.cuda.set_per_process_memory_fraction(min(1.0, float(limit_gb) * 2**30 / total), index)
+
+
 def git_revision() -> str:
     try:
         rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
@@ -136,6 +144,9 @@ def main():
     # Variable-size batches fragment the caching allocator; without this, reserved memory grows to the cap even
     # though the allocated peak is far lower (measured: 5.8 GB allocated, ~10 GB reserved at 400 s batches).
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # The main process only packs batches; more intra-op threads just spin (measured ~470% CPU) and take cores from
+    # the data workers and the other services on this machine.
+    torch.set_num_threads(4)
     args = parse_args()
     cfg = load_config(args.config, args.set)
     exp = Path(args.exp_dir)
@@ -147,10 +158,7 @@ def main():
     tcfg, acfg, ocfg, dcfg = cfg["tokenizer"], cfg["aut"], cfg["optim"], cfg["data"]
     scfg, ecfg = cfg.get("streaming", {}), cfg.get("eval", {})
     log = Logger(exp / "train_log.jsonl", rank == 0)
-    if ocfg.get("gpu_memory_limit_gb") and device.type == "cuda":
-        # Shared GPU: beyond this cap our own allocator raises OOM instead of eating other processes' headroom.
-        total = torch.cuda.get_device_properties(device).total_memory
-        torch.cuda.set_per_process_memory_fraction(min(1.0, float(ocfg["gpu_memory_limit_gb"]) * 2**30 / total), device)
+    cap_gpu_memory(device, ocfg.get("gpu_memory_limit_gb"))
 
     # ---------------------------------------------------------------- tokenizer, AuT, decoder
     vocab_json = exp / "vocab.json"
@@ -268,16 +276,18 @@ def main():
 
         if step % eval_every == 0 or step == total_steps:
             if rank == 0:
-                dev = {}
+                dev, t_eval = {}, time.time()
                 for name, ds in dev_sets:
                     res = decode_dataset(frontend, decoder, tokenizer, ds, ecfg.get("max_batch_seconds", 600),
-                                         local_frames=int(ecfg.get("local_frames", 0)), bf16=bf16)
+                                         local_frames=int(ecfg.get("local_frames", 0)), num_workers=workers, bf16=bf16)
                     dev[name] = score([r["ref"] for r in res], [r["hyp"] for r in res])["mer"]
                 if dev:
                     update_best(exp, best, step, sum(dev.values()) / len(dev), decoder)
                 save_decoder(exp / "last.pt", decoder, optimizer=optimizer.state_dict(),
                              scheduler=scheduler.state_dict(), step=step, best=best)
-                log({"event": "eval", "step": step, "dev_mer": dev, "best": best[:1]})
+                log({"event": "eval", "step": step, "dev_mer": dev, "best": best[:1],
+                     "eval_sec": round(time.time() - t_eval, 1)})
+                t0, audio_sec = time.time(), 0.0  # keep eval time out of the next rtf_x
             if world > 1:
                 dist.barrier()
     if world > 1:

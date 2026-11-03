@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -23,7 +24,7 @@ from ..evaluate import score
 from ..frontend import AuTFrontend
 from ..losses import ctc_loss
 from ..tokenizer import load_tokenizer
-from ..train import load_config, warmup_cosine
+from ..train import cap_gpu_memory, load_config, warmup_cosine
 
 
 @torch.no_grad()
@@ -41,6 +42,7 @@ def probe_dev_mer(frontend, probes, tokenizer, dataset, max_batch_seconds) -> di
 
 
 def main():
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # see train.main
     p = argparse.ArgumentParser("AuT-CTC M3 layer probe")
     p.add_argument("--config", nargs="+", required=True)
     p.add_argument("--exp_dir", required=True)
@@ -51,6 +53,7 @@ def main():
     exp = Path(args.exp_dir)
     exp.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cap_gpu_memory(device, cfg.get("optim", {}).get("gpu_memory_limit_gb"))
     rng = random.Random(int(cfg.get("seed", 0)))
     torch.manual_seed(int(cfg.get("seed", 0)))
 

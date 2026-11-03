@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -78,6 +79,9 @@ def resolve_checkpoint(exp_dir: Path, name: str) -> Path:
 
 
 def main():
+    from .train import cap_gpu_memory
+
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # see train.main
     p = argparse.ArgumentParser("AuT-CTC evaluation")
     p.add_argument("--exp_dir", required=True)
     p.add_argument("--manifest", nargs="+", required=True)
@@ -91,6 +95,7 @@ def main():
 
     exp = Path(args.exp_dir)
     cfg = yaml.safe_load((exp / "config.yaml").read_text())
+    cap_gpu_memory(torch.device(args.device), cfg.get("optim", {}).get("gpu_memory_limit_gb"))
     tokenizer = load_tokenizer(cfg["tokenizer"]["sp_model"], exp / "vocab.json")
     decoder, _ = load_decoder(resolve_checkpoint(exp, args.ckpt))
     decoder.to(args.device)

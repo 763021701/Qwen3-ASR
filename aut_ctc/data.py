@@ -6,12 +6,16 @@ Manifest: JSONL, one utterance per line, e.g.
    "source": "aishell1", "label_type": "human"}
 ``text`` is the raw transcript; it is normalized at load time so the rules can change later.
 Optional ``"t2s"``: OpenCC config ("hk2s" / "tw2s" / "t2s") for sources written in traditional characters.
+Optional ``"tar_offset"`` / ``"tar_size"``: ``audio`` is a WebDataset shard and the clip is the member at that byte
+range (see tools/wds_manifest.py), so shards are used without extracting them.
 """
 from __future__ import annotations
 
+import io
 import json
 import random
 import re
+import sys
 from collections import Counter
 
 import numpy as np
@@ -126,7 +130,12 @@ def load_manifest(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
-def read_audio(path: str, start: float = 0.0, end=None, sr: int = SAMPLE_RATE) -> np.ndarray:
+def read_audio(path: str, start: float = 0.0, end=None, sr: int = SAMPLE_RATE, tar_offset=None, tar_size=None) -> np.ndarray:
+    """tar_offset / tar_size: the clip is a member of an uncompressed tar (WebDataset shard) at that byte range."""
+    if tar_offset is not None:
+        with open(path, "rb") as f:
+            f.seek(tar_offset)
+            path = io.BytesIO(f.read(tar_size))
     with sf.SoundFile(path) as f:
         file_sr = f.samplerate
         f.seek(int(round(start * file_sr)))
@@ -148,8 +157,9 @@ class ManifestDataset(Dataset):
                 self.stats[reason] += 1
                 if ids is None:
                     continue
-                self.items.append((ex["id"], ex["audio"], float(ex.get("start") or 0.0), ex.get("end"),
-                                   info["text"], ids))
+                # int32 targets and interned paths keep millions of entries small (and shared with forked workers)
+                self.items.append((ex["id"], sys.intern(ex["audio"]), float(ex.get("start") or 0.0), ex.get("end"),
+                                   info["text"], np.asarray(ids, dtype=np.int32), ex.get("tar_offset"), ex.get("tar_size")))
                 self.sources.append(src)
                 self.durations.append(info["duration"])
         self.augment = augment
@@ -158,8 +168,8 @@ class ManifestDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, i):
-        uid, audio, start, end, text, ids = self.items[i]
-        wav = read_audio(audio, start, end)
+        uid, audio, start, end, text, ids, tar_offset, tar_size = self.items[i]
+        wav = read_audio(audio, start, end, tar_offset=tar_offset, tar_size=tar_size)
         if self.augment is not None:  # torch seeds every DataLoader worker differently
             wav = self.augment(wav, np.random.default_rng(int(torch.randint(2**31, ()))))
         return {"id": uid, "wav": wav, "text": text, "targets": ids}

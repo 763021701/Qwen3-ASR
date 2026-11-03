@@ -34,6 +34,18 @@ python -m aut_ctc.evaluate --exp_dir exp/stream --manifest data/dev_zh.jsonl --w
 
 流式识别：`StreamingRecognizer(AuTFrontend(...), decoder, tokenizer, window=200, left_chunks=4)`，`accept_waveform(pcm)` 返回 `{"final", "partial"}`，结束时调用 `finalize()`。
 
+## 数据（ModelScope 上的 WebDataset 分片）
+
+数据集 `huangpppu/{Gigaspeech-train-clean, WenetSpeech, KeSpeech, WenetSpeech-Chuan, WenetSpeech-Yue}` 都是 WebDataset（每条 `<key>.flac` + `<key>.json`/`.txt`，FLAC 16 kHz，约 60 MiB/小时）。
+
+- 训练直接读本地分片里的成员，不解包：清单条目 `audio` 指向 tar，`tar_offset`/`tar_size` 是 FLAC 成员的字节范围。
+- 下载：`python -m aut_ctc.tools.ms_download list|get`（用本机已登录的 ModelScope 账号；并行、按 sha256 校验、失败自动续传）。实测每条连接约 1 MiB/s、总带宽约 8–9 MiB/s，而训练消耗约 35 MiB/s（约 2,100 倍实时），所以先下载到本地再训练，不做在线 streaming。
+- 清单：`python -m aut_ctc.tools.wds_manifest`（按小时随机抽样、`--where` 过滤 json 字段、`--min_confidence` + `--confidence_tsv` 按 ROVER 置信度过滤；时长从 FLAC 头读取）。
+- KeSpeech 按 `style` 区分普通话（`Mandarin`/`Accent`）和 8 种次方言（`Dialect`）；`phase` 只是采集批次。
+- WenetSpeech-Chuan / Yue 的标注是伪标签，分片里没有置信度，从本地元数据导出 `key\tconfidence` 表后过滤：训练取 ≥ 0.7（Chuan 留约 64–69% 时长，Yue 约 97%），开发集取 ≥ 0.9。
+- 开发集来自不参与训练的分片（WenetSpeech 官方 DEV、KeSpeech 官方 dev，GigaSpeech/Chuan/Yue 单独的分片），且与开发集分片同一来源包/相邻的分片都不进训练。
+- 配比与构建脚本在 `/root/autodl-tmp/huangpu/aut_ctc_data/`（`build_mix200h.py`、`build_mix3000h.py`），训练配置是 `configs/mix200h.yaml`、`configs/mix3000h.yaml`。
+
 ## 词表
 
 SenseVoiceSmall 词表裁成中英紧凑子集，再补回方言相关的部分，V = 19,945：

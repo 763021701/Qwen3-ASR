@@ -1,0 +1,30 @@
+# 200 h validation mix on the shared GPU, merged over base.yaml:
+#   python -m aut_ctc.train --config aut_ctc/configs/base.yaml aut_ctc/configs/mix200h.yaml --exp_dir exp/mix200h_base
+# Mandarin 73 h (WenetSpeech 53 + KeSpeech Mandarin/Accent 20), English 53 h (GigaSpeech), Cantonese 34 h
+# (WenetSpeech-Yue), dialects 40 h (KeSpeech subdialects 20 + WenetSpeech-Chuan 20). Dev sets come from held-out
+# shards. Manifests: /root/autodl-tmp/huangpu/aut_ctc_data/build_mix200h.py
+data:
+  train_manifests:
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/train_gigaspeech.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/train_wenetspeech.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/train_kespeech_mandarin.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/train_kespeech_dialect.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/train_yue.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/train_chuan.jsonl
+  sampling_weights: [53, 53, 20, 20, 34, 20]   # hours: each pass covers every manifest once
+  dev_manifests:
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/dev_gigaspeech.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/dev_wenetspeech.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/dev_kespeech_mandarin.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/dev_kespeech_dialect.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/dev_chuan.jsonl
+    - /root/autodl-tmp/huangpu/aut_ctc_data/manifests/mix200h/dev_yue.jsonl
+  max_batch_seconds: 400
+  num_workers: 8
+optim:
+  grad_accum: 3                  # 1200 s of audio per optimizer step
+  gpu_memory_limit_gb: 8         # ~8.2 GB on the GPU, ~3.9 GB left for the 6006/6008 services
+  warmup_steps: 1000
+  epochs: 10                     # ~630 steps per epoch
+eval:
+  every_steps: 500
