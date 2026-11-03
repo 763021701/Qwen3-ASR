@@ -10,6 +10,7 @@ An existing <exp_dir>/last.pt is resumed automatically.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import math
@@ -132,6 +133,9 @@ def parse_args():
 
 
 def main():
+    # Variable-size batches fragment the caching allocator; without this, reserved memory grows to the cap even
+    # though the allocated peak is far lower (measured: 5.8 GB allocated, ~10 GB reserved at 400 s batches).
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     args = parse_args()
     cfg = load_config(args.config, args.set)
     exp = Path(args.exp_dir)
@@ -143,10 +147,14 @@ def main():
     tcfg, acfg, ocfg, dcfg = cfg["tokenizer"], cfg["aut"], cfg["optim"], cfg["data"]
     scfg, ecfg = cfg.get("streaming", {}), cfg.get("eval", {})
     log = Logger(exp / "train_log.jsonl", rank == 0)
+    if ocfg.get("gpu_memory_limit_gb") and device.type == "cuda":
+        # Shared GPU: beyond this cap our own allocator raises OOM instead of eating other processes' headroom.
+        total = torch.cuda.get_device_properties(device).total_memory
+        torch.cuda.set_per_process_memory_fraction(min(1.0, float(ocfg["gpu_memory_limit_gb"]) * 2**30 / total), device)
 
     # ---------------------------------------------------------------- tokenizer, AuT, decoder
     vocab_json = exp / "vocab.json"
-    tokenizer = load_tokenizer(tcfg["sp_model"], vocab_json if vocab_json.exists() else None)
+    tokenizer = load_tokenizer(tcfg["sp_model"], vocab_json if vocab_json.exists() else None, tcfg.get("extra_chars"))
     frontend = AuTFrontend(acfg["model_dir"], device, getattr(torch, acfg.get("dtype", "bfloat16")),
                            acfg.get("layer_ids", [-1]), acfg.get("attn_implementation", "sdpa"))
     decoder = AuTCTCDecoder(CTCDecoderConfig(**cfg["decoder"], layer_ids=frontend.layer_ids,
@@ -179,7 +187,8 @@ def main():
     # ---------------------------------------------------------------- optimization
     num_batches = WeightedBucketBatchSampler(train_set.durations, train_set.sources, weights,
                                              dcfg["max_batch_seconds"]).num_batches()
-    total_steps = int(ocfg.get("total_steps") or math.ceil(float(ocfg.get("epochs", 10)) * num_batches / world))
+    accum = int(ocfg.get("grad_accum", 1))
+    total_steps = int(ocfg.get("total_steps") or math.ceil(float(ocfg.get("epochs", 10)) * num_batches / (world * accum)))
     peak = float(ocfg["lr"])
     optimizer = torch.optim.AdamW(param_groups(decoder, float(ocfg.get("weight_decay", 0.01))), lr=peak,
                                   betas=tuple(ocfg.get("betas", (0.9, 0.98))), eps=float(ocfg.get("eps", 1e-8)))
@@ -214,36 +223,46 @@ def main():
     stream_kw = dict(p_stream=float(scfg.get("p_stream", 0.0)), windows=scfg.get("windows", [100, 200, 400]),
                      left_choices=scfg.get("left_chunks", [2, 4, 8, -1]))
     inter_w, grad_clip = float(cfg.get("loss", {}).get("inter_ctc_weight", 0.3)), float(ocfg.get("grad_clip", 5.0))
-    log({"event": "train", "total_steps": total_steps, "batches_per_pass": num_batches, "start_step": step})
+    log({"event": "train", "total_steps": total_steps, "batches_per_pass": num_batches, "grad_accum": accum,
+         "start_step": step})
 
     # ---------------------------------------------------------------- loop
     decoder.train()
     batches, t0, audio_sec = iter(loader), time.time(), 0.0
     while step < total_steps:
-        batch = next(batches)
         step += 1
-        n_window, chunk_frames, left_chunks = sample_stream_config(rng, **stream_kw)
-        feats, lens = frontend.encode(batch["input_features"], batch["mel_lens"], n_window)
-        targets, target_lens = batch["targets"].to(device), batch["target_lens"].to(device)
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
-            out = model(feats, lens, chunk_frames=chunk_frames, left_chunks=left_chunks)
-        loss, final, inter = total_loss(out, targets, target_lens, inter_w)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        sums = torch.zeros(3, device=device)  # loss, final CTC, inter CTC summed over micro-batches
+        for micro in range(accum):
+            batch = next(batches)
+            n_window, chunk_frames, left_chunks = sample_stream_config(rng, **stream_kw)
+            feats, lens = frontend.encode(batch["input_features"], batch["mel_lens"], n_window)
+            targets, target_lens = batch["targets"].to(device), batch["target_lens"].to(device)
+            # DDP all-reduces gradients only on the last micro-batch.
+            with model.no_sync() if world > 1 and micro < accum - 1 else contextlib.nullcontext():
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+                    out = model(feats, lens, chunk_frames=chunk_frames, left_chunks=left_chunks)
+                loss, final, inter = total_loss(out, targets, target_lens, inter_w)
+                (loss / accum).backward()
+            sums += torch.stack([loss.detach(), final.detach(), inter.detach() if inter is not None else sums[2] * 0])
+            audio_sec += float(batch["mel_lens"].sum()) / 100
+            if step % log_every == 0 and micro == accum - 1:
+                with torch.no_grad():
+                    valid = torch.arange(out["logits"].size(1), device=device)[None] < out["lens"][:, None]
+                    blank = (out["logits"].argmax(-1) == 0)[valid].float().mean().item()
+            del out, loss, final, inter
         grad_norm = torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
         optimizer.step()
         scheduler.step()
-        audio_sec += float(batch["mel_lens"].sum()) / 100
 
         if step % log_every == 0:
-            with torch.no_grad():
-                valid = torch.arange(out["logits"].size(1), device=device)[None] < out["lens"][:, None]
-                blank = (out["logits"].argmax(-1) == 0)[valid].float().mean().item()
             elapsed = time.time() - t0
-            log({"step": step, "loss": round(loss.item(), 4), "ctc": round(final.item(), 4),
-                 "inter": round(inter.item(), 4) if inter is not None else None, "lr": scheduler.get_last_lr()[0],
-                 "grad_norm": round(float(grad_norm), 3), "blank": round(blank, 3), "window": n_window,
-                 "left_chunks": left_chunks if chunk_frames else None, "rtf_x": round(audio_sec / elapsed, 1),
+            mean_loss, mean_final, mean_inter = (sums / accum).tolist()
+            log({"step": step, "loss": round(mean_loss, 4), "ctc": round(mean_final, 4),
+                 "inter": round(mean_inter, 4) if decoder.cfg.inter_ctc_layer else None,
+                 "lr": scheduler.get_last_lr()[0], "grad_norm": round(float(grad_norm), 3), "blank": round(blank, 3),
+                 "window": n_window, "left_chunks": left_chunks if chunk_frames else None,
+                 "rtf_x": round(audio_sec / elapsed, 1),
                  "max_mem_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2) if device.type == "cuda" else None})
             t0, audio_sec = time.time(), 0.0
 

@@ -5,7 +5,8 @@ aut:
   attn_implementation: sdpa      # flash_attention_2 when installed; sdpa applies the window mask explicitly
   layer_ids: [-1]                # decided by the M3 probe (configs/probe.yaml)
 tokenizer:
-  sp_model: /path/to/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model
+  sp_model: /root/autodl-tmp/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model
+  extra_chars: aut_ctc/extra_chars.txt   # dialect characters missing from SenseVoice; fixed once training starts
   style: woitn
 decoder:
   d_model: 512
@@ -30,6 +31,8 @@ optim:
   min_lr: 1.0e-5
   grad_clip: 5.0
   bf16: true
+  grad_accum: 1                  # micro-batches per optimizer step: effective batch = max_batch_seconds x grad_accum x GPUs
+  gpu_memory_limit_gb: null      # cap this process's CUDA allocator on a shared GPU (OOM here, not in other services)
   epochs: 10                     # total_steps = epochs x batches per pass / GPUs
   total_steps: null              # set to override epochs
 data:

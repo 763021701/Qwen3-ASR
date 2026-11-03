@@ -21,11 +21,11 @@ from torch.utils.data import Dataset, Sampler
 
 from .augment import resample, spec_augment
 from .frontend import SAMPLE_RATE, aut_output_lengths, compute_features
-from .tokenizer import normalize_text, to_halfwidth_alnum
+from .tokenizer import CJK, normalize_text, to_halfwidth_alnum
 
 # Dataset-specific markers (<SIL>, GigaSpeech <COMMA>, [noise], ...) are removed for every source.
 _MARKUP_RE = re.compile(r"<[A-Z_]+>|\[[A-Za-z_ ]+\]")
-_CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+_CJK_RE = re.compile(f"[{CJK}]")
 _DIGIT_RE = re.compile(r"\d")
 
 try:

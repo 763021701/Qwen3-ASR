@@ -15,14 +15,14 @@ from pathlib import Path
 import numpy as np
 
 from ..data import load_manifest, prepare_example
-from ..tokenizer import load_tokenizer
+from ..tokenizer import DEFAULT_EXTRA_CHARS, load_tokenizer
 
 DURATION_BINS = [0, 0.3, 1, 2, 5, 10, 20, 30, 60, float("inf")]
 
 
 def manifest_report(path, tokenizer, args, filtered_out=None) -> dict:
-    reasons, hours, ratios = Counter(), Counter(), defaultdict(list)
-    durations, tokens, unk, raw_digit, lost_boundaries = [], 0, 0, 0, 0
+    reasons, hours, ratios, oov_chars, is_oov = Counter(), Counter(), defaultdict(list), Counter(), {}
+    durations, tokens, unk, raw_digit = [], 0, 0, 0
     for ex in load_manifest(path):
         ids, reason, info = prepare_example(ex, tokenizer, args.style, args.min_duration, args.max_duration,
                                             drop_unk=False, upsample=args.upsample, num_queries=args.num_queries)
@@ -35,7 +35,10 @@ def manifest_report(path, tokenizer, args, filtered_out=None) -> dict:
         if "text" in info:
             tokens += info["num_tokens"]
             unk += info["num_unk"]
-            lost_boundaries += tokenizer.dropped_boundary_count(info["text"])
+            for c in info["text"] if info["num_unk"] else ():
+                if c not in is_oov:
+                    is_oov[c] = c != " " and tokenizer.UNK in tokenizer.encode(c)
+                oov_chars[c] += is_oov[c]
         if "T" in info and info["U'"]:
             ratios[ex.get("lang") or "unknown"].append(info["T"] / info["U'"])
         if ids is not None and filtered_out is not None:
@@ -56,8 +59,9 @@ def manifest_report(path, tokenizer, args, filtered_out=None) -> dict:
         "filter_hours": {k: round(v, 3) for k, v in hours.items()},
         "duration_hist": {f"{lo}-{hi}s": int(c) for lo, hi, c in zip(DURATION_BINS, DURATION_BINS[1:], hist)},
         "oov_rate": unk / max(tokens, 1),
+        # candidates for extra_chars.txt
+        "top_oov_chars": " ".join(f"{c}{n}" for c, n in oov_chars.most_common(50) if n),
         "raw_digit_ratio": raw_digit / max(len(durations), 1),
-        "lost_word_boundaries": lost_boundaries,  # isolated ▁ before a non-Han piece (DESIGN §6.6)
         "T_over_U": t_over_u,
         # DESIGN §8.4: switch to upsample=2 when more than 1% of samples have T/U' < 1.5
         "suggest_upsample_2": bool(len(all_r) and (all_r < 1.5).mean() > 0.01),
@@ -67,6 +71,7 @@ def manifest_report(path, tokenizer, args, filtered_out=None) -> dict:
 def main():
     p = argparse.ArgumentParser("AuT-CTC M2 data report")
     p.add_argument("--sp_model", required=True)
+    p.add_argument("--extra_chars", default=str(DEFAULT_EXTRA_CHARS), help="extra-character list ('' = none)")
     p.add_argument("--manifests", nargs="+", required=True)
     p.add_argument("--report", required=True)
     p.add_argument("--filtered_dir", default=None, help="write the kept entries of each manifest here")
@@ -78,7 +83,7 @@ def main():
     p.add_argument("--num_queries", type=int, default=0)
     args = p.parse_args()
 
-    tokenizer = load_tokenizer(args.sp_model)
+    tokenizer = load_tokenizer(args.sp_model, extra_chars=args.extra_chars or None)
     report = {"vocab_size": tokenizer.vocab_size, "manifests": {}}
     for path in args.manifests:
         out = None

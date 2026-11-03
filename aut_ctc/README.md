@@ -1,6 +1,6 @@
 # AuT-CTC
 
-冻结 Qwen3-ASR-1.7B 的音频编码器（AuT），在其 `ln_post` 输出上训练 Conformer-lite CTC Decoder（中英）。设计见 `references/aut_ctc_design/DESIGN.md`（v1.1）。本目录与 `ctc` 分支上照搬 Fun-ASR-Nano 的 CTC 实现互不依赖。
+冻结 Qwen3-ASR-1.7B 的音频编码器（AuT），在其 `ln_post` 输出上训练 Conformer-lite CTC Decoder（中、英、粤、中文方言）。设计见 `references/aut_ctc_design/DESIGN.md`（v1.1）。本目录与 `ctc` 分支上照搬 Fun-ASR-Nano 的 CTC 实现互不依赖。
 
 ## 环境
 
@@ -12,15 +12,19 @@
 ```bash
 # 测试（CPU；--real 额外用真实 AuT 权重）
 python -m aut_ctc.tests.test_frontend --real
-python -m aut_ctc.tests.test_tokenizer --sp_model /path/to/chn_jpn_yue_eng_ko_spectok.bpe.model --texts texts.txt
+python -m aut_ctc.tests.test_tokenizer --sp_model /root/autodl-tmp/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model --texts texts.txt
 python -m aut_ctc.tests.test_model
 python -m aut_ctc.tests.test_streaming
-# M2 数据报告（与训练同一套过滤逻辑），可选写出过滤后的清单
-python -m aut_ctc.tools.data_stats --sp_model ... --manifests data/train_zh.jsonl data/train_en.jsonl --report exp/data_report.json
+# M2 数据报告（与训练同一套过滤逻辑），可选写出过滤后的清单；top_oov_chars 是 extra_chars.txt 的补字候选
+python -m aut_ctc.tools.data_stats --sp_model /root/autodl-tmp/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model \
+    --manifests data/train_zh.jsonl data/train_en.jsonl --report exp/data_report.json
 # M3 层探针
 python -m aut_ctc.tools.probe_layers --config aut_ctc/configs/base.yaml aut_ctc/configs/probe.yaml --exp_dir exp/probe
 # M4 离线训练（多卡：torchrun --nproc_per_node N -m aut_ctc.train ...）；exp_dir 里有 last.pt 时自动续训
-python -m aut_ctc.train --config aut_ctc/configs/base.yaml --exp_dir exp/base --set data.max_batch_seconds=400
+# 共享 GPU（与 6006/6008 服务同卡）：每个 micro-batch 400 s、累计 3 步 = 设计默认的每步 1200 s。
+# 实测（V=19911，现在的 19945 只多 0.2%）：分配峰值 5.8 GB，进程占用约 8.2 GB，给同卡服务留约 3.9 GB；超出上限只会让本进程 OOM
+python -m aut_ctc.train --config aut_ctc/configs/base.yaml --exp_dir exp/base \
+    --set data.max_batch_seconds=400 optim.grad_accum=3 optim.gpu_memory_limit_gb=8
 # M5 动态窗口流式训练（stream.yaml 叠加在 base.yaml 上，init_from 指向 M4 最好的检查点）
 python -m aut_ctc.train --config aut_ctc/configs/base.yaml aut_ctc/configs/stream.yaml --exp_dir exp/stream
 # 评测：离线；或按流式方式（AuT 窗口 W + 块因果掩码）
@@ -29,6 +33,15 @@ python -m aut_ctc.evaluate --exp_dir exp/stream --manifest data/dev_zh.jsonl --w
 ```
 
 流式识别：`StreamingRecognizer(AuTFrontend(...), decoder, tokenizer, window=200, left_chunks=4)`，`accept_waveform(pcm)` 返回 `{"final", "partial"}`，结束时调用 `finalize()`。
+
+## 词表
+
+SenseVoiceSmall 词表裁成中英紧凑子集，再补回方言相关的部分，V = 19,945：
+
+- 原设计的 19,911（blank、unk、汉字 10,124、拉丁子词 9,674、标点 69、数字 10、标签 32），加上 4 个方言/粤语标签 `<|yue|> <|wuyu|> <|minnan|> <|dialect|>`（二期 query 用）、孤立 `▁`、`extra_chars.txt` 里的 29 个方言字。
+- 方言字：SenseVoice 和 Fun-ASR-Nano 的 CTC 词表汉字完全相同（10,124 个），Fun-ASR-Nano 对缺的字用 UTF-8 字节回退；这里改为每个字一个 id，候选来自本地语料的缺字统计和吴/粤/闽/客家常用字。补字后含 `<unk>` 的句子：上海话 9.0%→0，粤语 0.66%→0.0003%，四川话 0.007%→0.003%。拿到训练数据后用 `data_stats` 的 `top_oov_chars` 再补，**开训后不要再改**（会改变输出层）。
+- 编码：文本前加 `▁`，句首英文词与句中切分一致（否则 speech → s/pe/e/ch）；孤立 `▁` 只保留在两个英文/数字 piece 之间（qwen、russian 等词没有 ▁ 开头的 piece，丢掉会解码成 "andqwen"），挨着汉字或在两端时丢弃。
+- 规范化：带重音的拉丁字母折叠（é→e、ß→ss，原词表没有）；CJK 范围包括扩展 B 及以后（𠮶、𠊎）。
 
 ## 与设计文档的差异
 
@@ -41,6 +54,7 @@ python -m aut_ctc.evaluate --exp_dir exp/stream --manifest data/dev_zh.jsonl --w
 | TN | 中文 WeTextProcessing、英文 NeMo | 中文用 `cn_tn.py`（从 `ctc` 分支复制）；英文没有 TN，含数字的英文样本丢弃并计数 |
 | 繁转简 | OpenCC t2s | 装了 opencc 才做，否则告警跳过 |
 | `sampling_weights` | 按小时数加权 | 每步按权重选清单，等权 = 各清单步数相同 |
+| 词表 | V=19,911，丢弃所有孤立 `▁` | 见上面“词表”一节：+4 个方言标签、+孤立 `▁`（仅在英文词之间）、+29 个方言字，V=19,945 |
 
 ## 未实现
 
@@ -48,4 +62,4 @@ python -m aut_ctc.evaluate --exp_dir exp/stream --manifest data/dev_zh.jsonl --w
 
 ## 测试状态
 
-T1–T8、T11–T20 通过：T7/T8 用合成 SentencePiece 词表，T20 用合成词表在 MagicData 上海话 50 条上过拟合（MER 0）。T9/T10 需要真实 `.bpe.model`，本机没有。
+T1–T20 通过：T7–T10 用真实 SenseVoiceSmall `.bpe.model`（ModelScope `iic/SenseVoiceSmall`，sha256 已核对）；T20 用合成词表在 MagicData 上海话 50 条上过拟合（MER 0）。T21 依赖未实现的特征缓存。

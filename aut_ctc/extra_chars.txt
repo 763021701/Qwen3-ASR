@@ -1,0 +1,40 @@
+# Extra Han characters, appended after the SenseVoice-derived ids in this order (one per line; text after # is a comment).
+# All are missing from the SenseVoice vocab and from Fun-ASR-Nano's CTC vocab (same 10,124 Han characters, which
+# falls back to UTF-8 bytes for them). Counts are OOV occurrences in local corpora: MagicData Shanghainese (sh),
+# WenetSpeech-Chuan 1/3 sample (chuan), WenetSpeech-Yue 1/5 sample (yue). Extend from the data_stats OOV report.
+# Changing this list changes the output layer: decide it before training.
+
+# Wu
+搿  # sh 351, chuan 6, yue 1
+哴  # sh 53
+汏  # sh 48
+㑚
+覅
+嫑
+囥
+# Cantonese
+揾  # yue 10266
+惗  # yue 25
+噉  # yue 17
+嚿  # yue 11
+噏  # yue 1
+嚹
+嘍
+㷫
+𨋢
+𡃁
+# Min
+媠
+佮
+𪜶
+𣍐
+# Hakka / Gan
+𠊎
+吂
+𠮶
+# Other characters missing from the vocab in the local corpora
+妳  # yue 63
+祂  # yue 11
+虼  # chuan 12
+跍  # chuan 6
+粿  # yue 2

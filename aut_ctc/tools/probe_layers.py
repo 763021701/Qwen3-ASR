@@ -54,7 +54,7 @@ def main():
     rng = random.Random(int(cfg.get("seed", 0)))
     torch.manual_seed(int(cfg.get("seed", 0)))
 
-    tokenizer = load_tokenizer(cfg["tokenizer"]["sp_model"])
+    tokenizer = load_tokenizer(cfg["tokenizer"]["sp_model"], extra_chars=cfg["tokenizer"].get("extra_chars"))
     layer_ids = tuple(pcfg["layer_ids"])
     frontend = AuTFrontend(acfg["model_dir"], device, getattr(torch, acfg.get("dtype", "bfloat16")), layer_ids,
                            acfg.get("attn_implementation", "sdpa"))
