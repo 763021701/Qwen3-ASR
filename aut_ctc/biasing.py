@@ -81,7 +81,8 @@ class CTCRagQwen3ASR:
     @classmethod
     def from_pretrained(cls, model_dir, exp_dir, ckpt: str = "best", hotwords=None, retriever_device: str = "cpu",
                         device: str = "cuda:0", **kwargs) -> "CTCRagQwen3ASR":
-        """hotwords: default library (path, text or list). retriever_device: "cpu" (numpy) or "gpu" (Triton)."""
+        """hotwords: default library (path, text or list). retriever_device: "cpu" (per segment) or "gpu" (radar and
+        phoneme corrector batched on the GPU, same results)."""
         from ctc_rag_hw import CTCRagRetriever
 
         asr = Qwen3ASRModel.from_pretrained(model_dir, dtype=torch.bfloat16, device_map=device)
@@ -141,10 +142,10 @@ class CTCRagQwen3ASR:
         log_probs, lp_lens = self.ctc.log_probs(layers, lens)
         ctc_texts = self.ctc.greedy_text(log_probs, lp_lens)
         t = self._lap("ctc", t)
-        retrieve = context is None and bool(hotwords)
-        found = [self.retriever.retrieve_from_log_probs(lp[:n], self.max_hotwords, self.ctc_topk, hotwords=hotwords)
-                 .retrieved_hotwords[: self.max_hotwords] if retrieve else []
-                 for lp, n in zip(log_probs, lp_lens.tolist())]
+        found = [[] for _ in wavs]
+        if context is None and hotwords:
+            found = [r.retrieved_hotwords[: self.max_hotwords] for r in self.retriever.retrieve_batch(
+                log_probs, lp_lens.tolist(), self.max_hotwords, self.ctc_topk, hotwords=hotwords)]
         contexts = [" ".join(h) if context is None else context for h in found]  # space-separated, as in the examples
         t = self._lap("retrieval", t)
         raw = self._generate(embeds, contexts, language)

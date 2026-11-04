@@ -105,6 +105,23 @@ def main():
     assert calls == {"aut": 3, "get_audio_features": 0}, calls
     print("B4 ok: 9 segments in 3 batches -> 3 AuT passes, get_audio_features never called", flush=True)
 
+    from ctc_rag_hw import CTCRagRetriever
+    from qwen_asr.inference.utils import normalize_audios, split_audio_into_chunks
+
+    test_files = "/root/autodl-tmp/huangpu/ctc_rag_hw/examples/test_files"
+    wavs = [s for s, _ in split_audio_into_chunks(normalize_audios(f"{test_files}/surgery_dialogue_0133.wav")[0],
+                                                   16000, 30.0)] + wavs
+    feats, mel_lens = compute_features(asr.processor.feature_extractor, wavs)
+    with torch.no_grad():
+        layers, lens = extract_aut_features(pipe.aut, feats, mel_lens, pipe.ctc.layer_ids)
+        log_probs, lp_lens = pipe.ctc.log_probs(layers, lens)
+    args = dict(blank_id=tok.BLANK, ctc_tokenizer=table, frame_shift_ms=pipe.ctc.frame_shift_ms)
+    found = {device: [r.retrieved_hotwords for r in CTCRagRetriever(**args, device=device).retrieve_batch(
+        log_probs, lp_lens.tolist(), 30, 30, hotwords=f"{test_files}/hotwords_lib.txt")] for device in ("cpu", "gpu")}
+    assert found["cpu"] == found["gpu"]
+    print(f"B5 ok: batched GPU retrieval == per-segment CPU retrieval on {len(wavs)} segments "
+          f"({sum(map(len, found['gpu']))} hotwords)", flush=True)
+
 
 if __name__ == "__main__":
     main()
