@@ -32,6 +32,7 @@ class DataPipeline:
     mode: str
     is_streaming: bool
     sources: Tuple[SourceSpec, ...]
+    config: Optional[DataConfig] = None
     shards: Tuple[ShardInfo, ...] = ()
     source_indexes: Tuple[Optional[SourceIndex], ...] = ()
     estimated_samples: Optional[int] = None
@@ -76,8 +77,9 @@ def build_eval_dataset(
 
 def build_data_pipeline(
     config: Union[DataConfig, str, Path, dict],
+    force_iterable: bool = False,
 ) -> DataPipeline:
-    """Build a local training pipeline from a data config."""
+    """Build a training pipeline (map-style JSONL or streaming)."""
     if isinstance(config, (str, Path)):
         data_config = load_data_config(str(config))
     elif isinstance(config, dict):
@@ -91,7 +93,7 @@ def build_data_pipeline(
     weights = [source.weight for source in sources]
     normalize_weights(weights)
 
-    if _all_jsonl(sources):
+    if _all_jsonl(sources) and not force_iterable:
         if data_config.mixture.total_hours is not None:
             logger.warning(
                 "mixture.total_hours is ignored for JSONL-only sources; "
@@ -124,6 +126,7 @@ def build_data_pipeline(
             mode="offline_jsonl",
             is_streaming=False,
             sources=sources,
+            config=data_config,
             source_indexes=tuple(None for _ in sources),
             estimated_samples=len(sampler),
         )
@@ -151,6 +154,7 @@ def build_data_pipeline(
     targets = per_source_target_hours(sources, data_config.mixture.total_hours)
     datasets = []
     shards: List[ShardInfo] = []
+    jsonl_samples: List[int] = []
     for source, source_index, target_hours in zip(sources, indexes, targets):
         if source_index is not None:
             shards.extend(source_index.shards)
@@ -179,6 +183,7 @@ def build_data_pipeline(
                 seed=data_config.seed,
             )
             datasets.append(ManifestIterableDataset(manifest, seed=data_config.seed))
+            jsonl_samples.append(len(manifest))
 
     mixer = WeightedSourceMixer(datasets, weights, seed=data_config.seed)
     estimated_hours = None
@@ -199,21 +204,31 @@ def build_data_pipeline(
         web_samples = [
             index.total_samples for index in indexes if index is not None
         ]
-        if web_samples and all(value is not None for value in web_samples):
-            estimated_samples = sum(web_samples)
-    mode = (
-        "modelscope_stream"
-        if any(source.provider == "modelscope" for source in sources)
-        else "local_webdataset"
-    )
+        if all(value is not None for value in web_samples):
+            estimated_samples = sum(value for value in web_samples if value is not None)
+            estimated_samples += sum(jsonl_samples)
+    if force_iterable and _all_jsonl(sources):
+        mode = "offline_jsonl_stream"
+    elif any(source.provider == "modelscope" for source in sources):
+        mode = "modelscope_stream"
+    else:
+        mode = "local_webdataset"
     return DataPipeline(
         dataset=mixer,
         sampler=None,
         mode=mode,
         is_streaming=True,
         sources=sources,
+        config=data_config,
         shards=tuple(shards),
         source_indexes=tuple(indexes),
         estimated_samples=estimated_samples,
         estimated_hours=estimated_hours,
     )
+
+
+def build_stream_dataset(
+    config: Union[DataConfig, str, Path, dict],
+) -> DataPipeline:
+    """Always return an infinite iterable pipeline (needed by augmentation)."""
+    return build_data_pipeline(config, force_iterable=True)

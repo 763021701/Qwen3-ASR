@@ -70,6 +70,59 @@ class MixtureSpec:
 
 
 @dataclass(frozen=True)
+class SpeedAugmentSpec:
+    enabled: bool = True
+    prob: float = 0.5
+    factors: Tuple[float, ...] = (0.9, 1.0, 1.1)
+    factor_min: Optional[float] = None
+    factor_max: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SpecAugmentSpec:
+    enabled: bool = True
+    prob: float = 0.5
+    time_mask_param: int = 50
+    freq_mask_param: int = 27
+    num_time_masks: int = 2
+    num_freq_masks: int = 2
+
+
+@dataclass(frozen=True)
+class SimulationSpec:
+    enabled: bool = False
+    spool_dir: Optional[str] = None
+    scenarios: Optional[Tuple[str, ...]] = None
+    scenario_weights: Optional[Dict[str, float]] = None
+    severity_mapping: str = "linear"
+    severity_min: float = 0.0
+    severity_max: float = 1.0
+    clean_prob: float = 0.0
+    noise_dir: Optional[str] = None
+    noise_cache_files: int = 64
+    sample_rate: Optional[int] = None
+    audio_format: str = "wav"
+    max_spool_bytes: int = 10 * 1024**3
+    num_simulators: int = 4
+    clean_queue_size: int = 64
+    ready_queue_size: int = 256
+    stall_timeout_sec: float = 300.0
+    spool_ttl_sec: float = 3600.0
+    delete_spool_on_close: bool = True
+    seed: int = 42
+    run_id: Optional[str] = None
+    start_method: str = "spawn"
+    sim_version: str = "mega-asr-sim-v1"
+
+
+@dataclass(frozen=True)
+class AugmentationSpec:
+    speed: SpeedAugmentSpec = field(default_factory=SpeedAugmentSpec)
+    specaug: SpecAugmentSpec = field(default_factory=SpecAugmentSpec)
+    simulation: SimulationSpec = field(default_factory=SimulationSpec)
+
+
+@dataclass(frozen=True)
 class DataConfig:
     """Top-level data config consumed by :func:`build_data_pipeline`."""
 
@@ -79,6 +132,7 @@ class DataConfig:
     sample_rate: int = 16000
     mixture: MixtureSpec = field(default_factory=MixtureSpec)
     cache: CacheSpec = field(default_factory=CacheSpec)
+    augmentation: AugmentationSpec = field(default_factory=AugmentationSpec)
 
 
 def _as_bool(value: Any, default: bool = True) -> bool:
@@ -204,6 +258,159 @@ def _parse_source(raw: Dict[str, Any], base_dir: Optional[Path]) -> SourceSpec:
     )
 
 
+def _float_tuple(value: Any, default: Tuple[float, ...]) -> Tuple[float, ...]:
+    if value is None:
+        return default
+    parts = value.split(",") if isinstance(value, str) else value
+    result = tuple(float(item) for item in parts if str(item).strip())
+    return result or default
+
+
+def _parse_speed(raw: Any) -> SpeedAugmentSpec:
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise ValueError("data.augmentation.speed must be a mapping.")
+    prob = float(raw.get("prob", 0.5))
+    if not 0.0 <= prob <= 1.0:
+        raise ValueError("data.augmentation.speed.prob must be in [0, 1].")
+    factors = _float_tuple(raw.get("factors"), (0.9, 1.0, 1.1))
+    if any(factor <= 0 for factor in factors):
+        raise ValueError("data.augmentation.speed.factors must be positive.")
+    factor_min = raw.get("factor_min")
+    factor_max = raw.get("factor_max")
+    factor_min = None if factor_min is None else float(factor_min)
+    factor_max = None if factor_max is None else float(factor_max)
+    if (factor_min is None) != (factor_max is None):
+        raise ValueError("speed.factor_min and factor_max must be set together.")
+    if factor_min is not None and factor_min > factor_max:
+        raise ValueError("speed.factor_min must be <= factor_max.")
+    return SpeedAugmentSpec(
+        enabled=_as_bool(raw.get("enabled"), default=True),
+        prob=prob,
+        factors=factors,
+        factor_min=factor_min,
+        factor_max=factor_max,
+    )
+
+
+def _parse_specaug(raw: Any) -> SpecAugmentSpec:
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise ValueError("data.augmentation.specaug must be a mapping.")
+    prob = float(raw.get("prob", 0.5))
+    if not 0.0 <= prob <= 1.0:
+        raise ValueError("data.augmentation.specaug.prob must be in [0, 1].")
+    values = {
+        "time_mask_param": int(raw.get("time_mask_param", 50)),
+        "freq_mask_param": int(raw.get("freq_mask_param", 27)),
+        "num_time_masks": int(raw.get("num_time_masks", 2)),
+        "num_freq_masks": int(raw.get("num_freq_masks", 2)),
+    }
+    if any(value < 0 for value in values.values()):
+        raise ValueError("SpecAugment mask parameters must be >= 0.")
+    return SpecAugmentSpec(
+        enabled=_as_bool(raw.get("enabled"), default=True),
+        prob=prob,
+        **values,
+    )
+
+
+def _parse_simulation(raw: Any, base_dir: Optional[Path]) -> SimulationSpec:
+    if raw is None:
+        return SimulationSpec()
+    if not isinstance(raw, dict):
+        raise ValueError("data.augmentation.simulation must be a mapping.")
+    enabled = _as_bool(raw.get("enabled"), default=False)
+    spool_dir = _resolve_path(str(raw.get("spool_dir") or "") or None, base_dir)
+    if enabled and not spool_dir:
+        raise ValueError("simulation.spool_dir is required when simulation is enabled.")
+    scenarios = raw.get("scenarios")
+    if scenarios is not None:
+        scenarios = tuple(str(name) for name in scenarios)
+    raw_weights = raw.get("scenario_weights")
+    scenario_weights = None
+    if raw_weights is not None:
+        if not isinstance(raw_weights, dict):
+            raise ValueError("simulation.scenario_weights must be a mapping.")
+        scenario_weights = {
+            str(name): float(value) for name, value in raw_weights.items()
+        }
+        if any(value <= 0 for value in scenario_weights.values()):
+            raise ValueError("simulation.scenario_weights must be positive.")
+    severity_min = float(raw.get("severity_min", 0.0))
+    severity_max = float(raw.get("severity_max", 1.0))
+    if not 0.0 <= severity_min <= severity_max <= 1.0:
+        raise ValueError("simulation severity_min/max must satisfy 0 <= min <= max <= 1.")
+    clean_prob = float(raw.get("clean_prob", 0.0))
+    if not 0.0 <= clean_prob <= 1.0:
+        raise ValueError("simulation.clean_prob must be in [0, 1].")
+    max_spool_gb = raw.get("max_spool_gb")
+    if max_spool_gb is not None:
+        max_spool_bytes = int(float(max_spool_gb) * 1e9)
+    else:
+        max_spool_bytes = int(raw.get("max_spool_bytes", 10 * 1024**3))
+    if max_spool_bytes <= 0:
+        raise ValueError("simulation.max_spool_bytes must be positive.")
+    sample_rate = raw.get("sample_rate")
+    sample_rate = None if sample_rate is None else int(sample_rate)
+    if sample_rate is not None and sample_rate <= 0:
+        raise ValueError("simulation.sample_rate must be positive.")
+    start_method = str(raw.get("start_method") or "spawn")
+    if start_method not in {"spawn", "fork", "forkserver"}:
+        raise ValueError("simulation.start_method must be spawn, fork, or forkserver.")
+    simulation = SimulationSpec(
+        enabled=enabled,
+        spool_dir=spool_dir,
+        scenarios=scenarios,
+        scenario_weights=scenario_weights,
+        severity_mapping=str(raw.get("severity_mapping") or "linear"),
+        severity_min=severity_min,
+        severity_max=severity_max,
+        clean_prob=clean_prob,
+        noise_dir=_resolve_path(str(raw.get("noise_dir") or "") or None, base_dir),
+        noise_cache_files=max(1, int(raw.get("noise_cache_files", 64))),
+        sample_rate=sample_rate,
+        audio_format=str(raw.get("audio_format") or "wav").lower().lstrip("."),
+        max_spool_bytes=max_spool_bytes,
+        num_simulators=max(1, int(raw.get("num_simulators", 4))),
+        clean_queue_size=max(1, int(raw.get("clean_queue_size", 64))),
+        ready_queue_size=max(1, int(raw.get("ready_queue_size", 256))),
+        stall_timeout_sec=float(raw.get("stall_timeout_sec", 300.0)),
+        spool_ttl_sec=float(raw.get("spool_ttl_sec", 3600.0)),
+        delete_spool_on_close=_as_bool(raw.get("delete_spool_on_close"), default=True),
+        seed=int(raw.get("seed", 42)),
+        run_id=str(raw.get("run_id") or "") or None,
+        start_method=start_method,
+        sim_version=str(raw.get("sim_version") or "mega-asr-sim-v1"),
+    )
+    if simulation.audio_format not in {"wav", "flac"}:
+        raise ValueError("simulation.audio_format must be 'wav' or 'flac'.")
+    if simulation.enabled:
+        from finetuning.augmentation.simulator import SCENARIOS
+
+        if simulation.scenarios is not None:
+            unknown = set(simulation.scenarios) - set(SCENARIOS)
+            if unknown:
+                raise ValueError(f"Unknown simulation scenarios: {sorted(unknown)}")
+        if simulation.scenario_weights is not None:
+            unknown = set(simulation.scenario_weights) - set(SCENARIOS)
+            if unknown:
+                raise ValueError(f"Unknown simulation scenario weights: {sorted(unknown)}")
+    return simulation
+
+
+def _parse_augmentation(raw: Any, base_dir: Optional[Path]) -> AugmentationSpec:
+    if raw is None:
+        return AugmentationSpec()
+    if not isinstance(raw, dict):
+        raise ValueError("data.augmentation must be a mapping.")
+    return AugmentationSpec(
+        speed=_parse_speed(raw.get("speed")),
+        specaug=_parse_specaug(raw.get("specaug")),
+        simulation=_parse_simulation(raw.get("simulation"), base_dir),
+    )
+
+
 def _parse_cache(raw: Any, base_dir: Optional[Path]) -> CacheSpec:
     if raw is None:
         raw = {}
@@ -264,6 +471,7 @@ def parse_data_config(raw: Dict[str, Any], base_dir: Optional[Path] = None) -> D
         raise ValueError(
             "ModelScope sources require data.cache.dir for downloaded shards."
         )
+    augmentation = _parse_augmentation(raw.get("augmentation"), base_dir)
 
     raw_mixture = raw.get("mixture") or {}
     total_hours = raw_mixture.get("total_hours")
@@ -296,6 +504,7 @@ def parse_data_config(raw: Dict[str, Any], base_dir: Optional[Path] = None) -> D
         sample_rate=int(raw.get("sample_rate", 16000)),
         mixture=mixture,
         cache=cache,
+        augmentation=augmentation,
     )
 
 

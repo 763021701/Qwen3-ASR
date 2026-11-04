@@ -114,13 +114,13 @@ python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage all --dry_run 1
 - 脚本：`finetuning/qwen3_asr_sft.py`
 - 数据：`--data_config` YAML（`finetuning/data_pipeline`），支持 JSONL、本地 WebDataset、ModelScope WebDataset
 - 常用参数：`--model_path`、`--data_config`、`--eval_file`、`--output_dir`、`--max_steps`（仅流式）、`--sr`、`--batch_size`、`--grad_acc`、`--lr`、`--epochs`、`--save_steps`、`--resume` / `--resume_from`
-- 在线增强（默认关闭，只用于 train collator，不用于 eval）：`--augment 1` 开启；常用参数 `--augment_prob`、`--speed_prob`、`--speed_factors`、`--noise_prob`、`--noise_snr_min`、`--noise_snr_max`、`--specaug_prob`、`--specaug_time_mask_param`、`--specaug_freq_mask_param`、`--specaug_num_time_masks`、`--specaug_num_freq_masks`。pipeline YAML 中写在 `training:` 下会透传给训练脚本。
+- 增强：在 data config 的 `augmentation:` 下配置；collator 只保留 `speed` + `specaug`。可选 `simulation:` 开启伪在线 mega-asr-sim（spool + simulator 进程）。
 
 增强建议：
 
-- 默认先用 `augment: 0` 建 baseline。
-- 低资源、说话人/录音条件覆盖不足时，可先尝试 `augment: 1`、`speed_factors: "0.9,1.0,1.1"`、中等 `noise_prob`、较低到中等 `specaug_prob`。
-- AddNoise 当前为合成白噪声；若用户需要真实背景噪声，先确认噪声数据路径、采样率、授权和混合策略后再扩展。
+- baseline：关闭 `augmentation.speed.enabled` 与 `augmentation.specaug.enabled`。
+- 低资源、说话人/录音条件覆盖不足时：开启 speed（`0.9, 1.0, 1.1`）和中等 SpecAugment；可选开启 `augmentation.simulation` 使用 mega-asr-sim + 有界 spool。
+- simulator 的噪声场景应配置真实噪声目录；白噪声仅用于流程 smoke test。
 
 ## 附加材料
 

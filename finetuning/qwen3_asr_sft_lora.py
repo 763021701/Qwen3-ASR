@@ -36,15 +36,15 @@ if _REPO_ROOT not in sys.path:
 # Share the SFT data recipe and generation metric for controlled comparisons.
 if __package__:
     from .qwen3_asr_sft import (
-        AudioAugmentConfig, DataCollatorForQwen3ASRFinetuning,
+        DataCollatorForQwen3ASRFinetuning,
         KeepBestWerCheckpointsCallback, _load_extra_eval_items,
-        build_training_pipeline,
+        build_training_data,
     )
 else:
     from qwen3_asr_sft import (
-        AudioAugmentConfig, DataCollatorForQwen3ASRFinetuning,
+        DataCollatorForQwen3ASRFinetuning,
         KeepBestWerCheckpointsCallback, _load_extra_eval_items,
-        build_training_pipeline,
+        build_training_data,
     )
 
 # Audio attention projections live in self_attn; fc1/fc2 are direct layer children.
@@ -490,33 +490,6 @@ def parse_args():
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--resume", type=int, default=0)
 
-    # Online audio augmentation (train only; default off)
-    p.add_argument("--augment", type=int, default=0, choices=(0, 1))
-    p.add_argument("--augment_prob", type=float, default=1.0)
-    p.add_argument("--speed_prob", type=float, default=0.5)
-    p.add_argument("--speed_factors", type=str, default="0.9,1.0,1.1")
-    p.add_argument("--noise_prob", type=float, default=0.5)
-    p.add_argument("--noise_snr_min", type=float, default=5.0)
-    p.add_argument("--noise_snr_max", type=float, default=20.0)
-    p.add_argument(
-        "--noise_dir",
-        type=str,
-        default="",
-        help="Directory of real noise wavs (e.g. DNS-Challenge noise_fullband). "
-        "When set, AddNoise samples real noise files instead of synthetic white noise.",
-    )
-    p.add_argument("--specaug_prob", type=float, default=0.5)
-    p.add_argument("--specaug_time_mask_param", type=int, default=50)
-    p.add_argument("--specaug_freq_mask_param", type=int, default=27)
-    p.add_argument("--specaug_num_time_masks", type=int, default=2)
-    p.add_argument("--specaug_num_freq_masks", type=int, default=2)
-
-    # No-speech segment augmentation (train only; default off)
-    p.add_argument("--nospeech_augment", type=int, default=0, choices=(0, 1))
-    p.add_argument("--nospeech_prob", type=float, default=0.3)
-    p.add_argument("--nospeech_pad_min_sec", type=float, default=0.5)
-    p.add_argument("--nospeech_pad_max_sec", type=float, default=3.0)
-
     # LoRA (default off)
     p.add_argument("--use_lora", type=int, default=0, choices=(0, 1))
     p.add_argument("--lora_scope", type=str, default="encoder_aligner",
@@ -542,10 +515,10 @@ def parse_args():
 def main():
     args_cli = parse_args()
 
-    pipeline = build_training_pipeline(args_cli)
-    train_dataset = pipeline.dataset
-    custom_train_sampler = pipeline.sampler
-    streaming = pipeline.is_streaming
+    training_data = build_training_data(args_cli)
+    train_dataset = training_data.dataset
+    custom_train_sampler = training_data.sampler
+    streaming = training_data.streaming
 
     eval_dataset = None
     if args_cli.eval_file:
@@ -571,7 +544,7 @@ def main():
         print("[lora] scope=%s r=%d alpha=%d dropout=%s"
               % (args_cli.lora_scope, args_cli.lora_r, args_cli.lora_alpha, args_cli.lora_dropout))
 
-    augment_cfg = AudioAugmentConfig.from_args(args_cli)
+    augment_cfg = training_data.augmentation
     train_collator = DataCollatorForQwen3ASRFinetuning(
         processor=processor,
         sampling_rate=args_cli.sr,
@@ -666,38 +639,27 @@ def main():
         lr_llm=args_cli.lr_llm,
     )
 
-    if trainer.args.process_index == 0 and augment_cfg.enabled:
-        print(
-            "[augment] enabled: speed_prob=%s noise_prob=%s specaug_prob=%s"
-            % (augment_cfg.speed_prob, augment_cfg.noise_prob, augment_cfg.specaug_prob)
-        )
-        if augment_cfg.noise_library is not None and augment_cfg.noise_library.enabled:
-            print(
-                "[augment] noise_dir=%s files=%d"
-                % (augment_cfg.noise_dir, augment_cfg.noise_library.num_files)
-            )
-        if augment_cfg.nospeech.enabled:
-            ns = augment_cfg.nospeech
-            print(
-                "[augment] nospeech_prob=%s pad=%.1f-%.1fs"
-                % (ns.prob, ns.pad_min_sec, ns.pad_max_sec)
-            )
-
     resume_from = (args_cli.resume_from or "").strip()
     if not resume_from and args_cli.resume == 1:
         resume_from = find_latest_checkpoint(training_args.output_dir) or ""
 
-    if resume_from:
-        if trainer.args.process_index == 0:
-            print(f"[resume] resume_from_checkpoint = {resume_from}")
-            if streaming:
-                print(
-                    "[resume] streaming data uses Trainer batch skipping; "
-                    "resume may re-iterate and discard some samples."
-                )
-        trainer.train(resume_from_checkpoint=resume_from)
-    else:
-        trainer.train()
+    try:
+        training_data.start_service()
+        if resume_from:
+            if trainer.args.process_index == 0:
+                print(f"[resume] resume_from_checkpoint = {resume_from}")
+                if streaming:
+                    print(
+                        "[resume] streaming data uses Trainer batch skipping; "
+                        "resume may re-iterate and discard some samples."
+                    )
+            trainer.train(resume_from_checkpoint=resume_from)
+        else:
+            trainer.train()
+    finally:
+        if trainer.args.process_index == 0 and training_data.service is not None:
+            print("[augment] service stats: %s" % training_data.service.snapshot())
+        training_data.close()
 
 if __name__ == "__main__":
     main()

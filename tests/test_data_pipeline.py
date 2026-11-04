@@ -158,6 +158,40 @@ class ConfigTest(unittest.TestCase):
                 }]
             })
 
+    def test_augmentation_spec(self):
+        config = parse_data_config({
+            "sources": [{
+                "name": "x", "backend": "jsonl", "path": "/tmp/x.jsonl",
+            }],
+            "augmentation": {
+                "speed": {"prob": 0.2, "factors": [0.9, 1.1]},
+                "specaug": {"enabled": False},
+                "simulation": {
+                    "enabled": True,
+                    "spool_dir": "/tmp/aug_spool",
+                    "scenarios": ["noise", "far_field"],
+                    "max_spool_gb": 0.5,
+                },
+            },
+        })
+        augmentation = config.augmentation
+        self.assertEqual(augmentation.speed.prob, 0.2)
+        self.assertEqual(augmentation.speed.factors, (0.9, 1.1))
+        self.assertFalse(augmentation.specaug.enabled)
+        self.assertTrue(augmentation.simulation.enabled)
+        self.assertEqual(augmentation.simulation.spool_dir, "/tmp/aug_spool")
+        self.assertEqual(augmentation.simulation.scenarios, ("noise", "far_field"))
+        self.assertEqual(augmentation.simulation.max_spool_bytes, 500_000_000)
+
+    def test_simulation_requires_spool_dir(self):
+        with self.assertRaises(ValueError):
+            parse_data_config({
+                "sources": [{
+                    "name": "x", "backend": "jsonl", "path": "/tmp/x.jsonl",
+                }],
+                "augmentation": {"simulation": {"enabled": True}},
+            })
+
 
 class ManifestPipelineTest(unittest.TestCase):
     def _make_config(self, root: Path):
@@ -228,6 +262,18 @@ class ManifestPipelineTest(unittest.TestCase):
             row = dataset[0]
             self.assertTrue(row["target"].startswith("language Chinese<asr_text>"))
             self.assertTrue(Path(row["audio"]).is_file())
+
+    def test_force_iterable_all_jsonl(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pipeline = build_data_pipeline(self._make_config(root), force_iterable=True)
+            self.assertTrue(pipeline.is_streaming)
+            self.assertEqual(pipeline.mode, "offline_jsonl_stream")
+            self.assertIsNone(pipeline.sampler)
+            self.assertIsNotNone(pipeline.config)
+            samples = list(itertools.islice(pipeline.dataset, 3))
+            self.assertEqual(len(samples), 3)
+            self.assertTrue(all("target" in sample for sample in samples))
 
     def test_manifest_dataset_checks_audio(self):
         with tempfile.TemporaryDirectory() as td:
@@ -478,8 +524,8 @@ class CollatorIntegrationTest(unittest.TestCase):
         trainer.custom_train_sampler = sampler
         self.assertIs(trainer._get_train_sampler(), sampler)
 
-    def test_build_training_pipeline_streaming_without_curriculum_arg(self):
-        from finetuning.qwen3_asr_sft import build_training_pipeline
+    def test_build_training_data_streaming_without_curriculum_arg(self):
+        from finetuning.qwen3_asr_sft import build_training_data
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -503,8 +549,9 @@ class CollatorIntegrationTest(unittest.TestCase):
                 encoding="utf-8",
             )
             args = SimpleNamespace(data_config=str(config_path), max_steps=1)
-            pipeline = build_training_pipeline(args)
-            self.assertTrue(pipeline.is_streaming)
+            training_data = build_training_data(args)
+            self.assertTrue(training_data.streaming)
+            training_data.close()
 
 
 if __name__ == "__main__":

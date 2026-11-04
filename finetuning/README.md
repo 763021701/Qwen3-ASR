@@ -63,9 +63,23 @@ data:
       text_template: raw
   mixture:
     seed: 42
+  augmentation:
+    speed:
+      enabled: true
+      prob: 0.5
+      factors: [0.9, 1.0, 1.1]
+    specaug:
+      enabled: true
+      prob: 0.5
+    simulation:
+      enabled: false
+      spool_dir: ./aug_spool
+      # scenarios: [noise, far_field]
 ```
 
 Use `text_template: "language {language}<asr_text>{text}"` when the JSONL `text` field contains a bare transcript instead of a full Qwen3 label. WebDataset and ModelScope sources are configured in the same file; streaming sources also require `--max_steps`.
+
+When `augmentation.simulation.enabled` is true, SFT/LoRA start a pseudo-online mega-asr-sim service: a reader process feeds simulator processes, augmented audio is written to a bounded spool, and the trainer reads it back. This mode also requires `--max_steps`.
 
 ### 4) Fine-tune (single GPU)
 

@@ -8,3 +8,12 @@ data:
       weight: 1.0
   mixture:
     seed: 42
+  augmentation:
+    speed:
+      enabled: true
+      prob: 0.5
+      factor_min: 0.8
+      factor_max: 1.6
+    specaug:
+      enabled: true
+      prob: 0.5

@@ -127,12 +127,12 @@ Do NOT modify `finetuning/qwen3_asr_sft.py` or `finetuning/qwen3_asr_sft_lora.py
 - **Data**: `--data_config` YAML via `finetuning/data_pipeline` — JSONL, local WebDataset, or ModelScope WebDataset
 - **Key args (full)**: `--model_path`, `--data_config`, `--eval_file`, `--output_dir`, `--max_steps` (streaming only), `--sr`, `--batch_size`, `--grad_acc`, `--lr`, `--epochs`, `--save_steps`, `--freeze_audio_tower`, `--resume` / `--resume_from`
 - **Key args (LoRA)**: same basic args plus `--lora_scope`, `--lora_r`, `--lora_alpha`, `--lora_dropout`, `--merge_lora_into_base_from`, `--lr_encoder`, `--lr_aligner`, `--lr_llm`
-- **Online augmentation** (default off, train collator only; available in both scripts): `--augment 1` to enable; `--augment_prob`, `--speed_prob`, `--speed_factors`, `--noise_prob`, `--noise_snr_min`, `--noise_snr_max`, `--specaug_prob`, `--specaug_time_mask_param`, `--specaug_freq_mask_param`, `--specaug_num_time_masks`, `--specaug_num_freq_masks`. In pipeline YAML, write under `training:`.
+- **Augmentation**: configured in the data config under `augmentation:`; collator-side `speed` + `specaug` only. Optional `simulation:` enables pseudo-online mega-asr-sim (spool + simulator processes).
 
 **Augmentation strategy**:
-- Start with `augment: 0` for baseline.
-- For low-resource or limited speaker/acoustic coverage: try `augment: 1`, `speed_factors: "0.9,1.0,1.1"`, moderate `noise_prob`, low-to-moderate `specaug_prob`.
-- AddNoise currently synthesizes white noise; for real background noise, confirm noise data path, sample rate, licensing, and mixing approach with user first.
+- Baseline: set `augmentation.speed.enabled: false` and `augmentation.specaug.enabled: false`.
+- Low-resource / limited acoustic coverage: enable speed (`0.9, 1.0, 1.1`) and moderate SpecAugment; optionally enable `augmentation.simulation` for mega-asr-sim with a bounded spool.
+- The simulator needs a real noise directory for meaningful noise scenarios; white noise is only a smoke-test fallback.
 
 ## LoRA Training Modes
 

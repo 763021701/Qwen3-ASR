@@ -43,14 +43,10 @@ if _REPO_ROOT not in sys.path:
 if __package__:
     from .module_freeze import (PARTS, count_part_parameters, parse_parts,
                                 set_part_freeze)
-    from .noise_augmentation import NoiseLibrary, maybe_add_noise
-    from .nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
     from .processor_collate import build_processor_batch_inputs
 else:
     from module_freeze import (PARTS, count_part_parameters, parse_parts,
                                set_part_freeze)
-    from noise_augmentation import NoiseLibrary, maybe_add_noise
-    from nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
     from processor_collate import build_processor_batch_inputs
 
 _ASR_TEXT_TAG = "<asr_text>"
@@ -196,72 +192,55 @@ def make_preprocess_fn_prefix_only(processor, curriculum: bool = False):
     return _preprocess
 
 
-def _parse_float_list(value: str, default: Tuple[float, ...]) -> Tuple[float, ...]:
-    raw = (value or "").strip()
-    if not raw:
-        return default
-    return tuple(float(x.strip()) for x in raw.split(",") if x.strip())
-
-
 @dataclass
 class AudioAugmentConfig:
-    """Optional online augmentation for training only."""
+    """Speed perturbation + SpecAugment, both applied online in the collator."""
 
-    enabled: bool = False
-    augment_prob: float = 1.0
+    enabled: bool = True
+    speed_enabled: bool = True
     speed_prob: float = 0.5
     speed_factors: Tuple[float, ...] = (0.9, 1.0, 1.1)
     speed_factor_min: Optional[float] = None
     speed_factor_max: Optional[float] = None
-    noise_prob: float = 0.5
-    noise_snr_min: float = 5.0
-    noise_snr_max: float = 20.0
-    noise_dir: str = ""
+    specaug_enabled: bool = True
     specaug_prob: float = 0.5
     specaug_time_mask_param: int = 50
     specaug_freq_mask_param: int = 27
     specaug_num_time_masks: int = 2
     specaug_num_freq_masks: int = 2
-    nospeech: NoSpeechAugmentConfig = field(default_factory=NoSpeechAugmentConfig)
 
     _specaug_masks: Any = field(default=None, repr=False, compare=False)
-    noise_library: Optional[NoiseLibrary] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
-        if not self.enabled:
+        if not self.enabled or not self.specaug_enabled:
             return
         try:
-            import torchaudio
+            import torchaudio  # noqa: F401
         except ImportError as e:
             raise ImportError(
-                "Audio augmentation requires torchaudio. Install a build matching your PyTorch, e.g.: "
+                "SpecAugment requires torchaudio. Install a build matching your PyTorch, e.g.: "
                 "pip install --no-deps 'torchaudio==2.8.0+cu128' "
                 "--index-url https://download.pytorch.org/whl/cu128"
             ) from e
-        self.noise_library = NoiseLibrary.from_dir(self.noise_dir)
         self._specaug_masks = _build_specaug_transforms(self)
 
     @classmethod
-    def from_args(cls, args: argparse.Namespace) -> "AudioAugmentConfig":
+    def from_spec(cls, spec: Any) -> "AudioAugmentConfig":
+        speed = spec.speed
+        specaug = spec.specaug
         return cls(
-            enabled=bool(getattr(args, "augment", 0)),
-            augment_prob=float(getattr(args, "augment_prob", 1.0)),
-            speed_prob=float(getattr(args, "speed_prob", 0.5)),
-            speed_factors=_parse_float_list(
-                getattr(args, "speed_factors", ""), (0.9, 1.0, 1.1)
-            ),
-            speed_factor_min=getattr(args, "speed_factor_min", None),
-            speed_factor_max=getattr(args, "speed_factor_max", None),
-            noise_prob=float(getattr(args, "noise_prob", 0.5)),
-            noise_snr_min=float(getattr(args, "noise_snr_min", 5.0)),
-            noise_snr_max=float(getattr(args, "noise_snr_max", 20.0)),
-            noise_dir=str(getattr(args, "noise_dir", "") or ""),
-            specaug_prob=float(getattr(args, "specaug_prob", 0.5)),
-            specaug_time_mask_param=int(getattr(args, "specaug_time_mask_param", 50)),
-            specaug_freq_mask_param=int(getattr(args, "specaug_freq_mask_param", 27)),
-            specaug_num_time_masks=int(getattr(args, "specaug_num_time_masks", 2)),
-            specaug_num_freq_masks=int(getattr(args, "specaug_num_freq_masks", 2)),
-            nospeech=NoSpeechAugmentConfig.from_args(args),
+            enabled=bool(speed.enabled or specaug.enabled),
+            speed_enabled=bool(speed.enabled),
+            speed_prob=float(speed.prob),
+            speed_factors=tuple(float(value) for value in speed.factors),
+            speed_factor_min=speed.factor_min,
+            speed_factor_max=speed.factor_max,
+            specaug_enabled=bool(specaug.enabled),
+            specaug_prob=float(specaug.prob),
+            specaug_time_mask_param=int(specaug.time_mask_param),
+            specaug_freq_mask_param=int(specaug.freq_mask_param),
+            specaug_num_time_masks=int(specaug.num_time_masks),
+            specaug_num_freq_masks=int(specaug.num_freq_masks),
         )
 
 
@@ -298,34 +277,24 @@ def augment_waveform(
     sr: int,
     cfg: AudioAugmentConfig,
     rng: random.Random,
-    *,
-    noise_enabled: bool = True,
 ) -> np.ndarray:
-    if not cfg.enabled or rng.random() > cfg.augment_prob:
+    if not cfg.enabled or not cfg.speed_enabled or rng.random() > cfg.speed_prob:
         return wav
-    out = wav.astype(np.float32, copy=False)
-    if rng.random() < cfg.speed_prob:
-        if cfg.speed_factor_min is not None and cfg.speed_factor_max is not None:
-            factor = rng.uniform(cfg.speed_factor_min, cfg.speed_factor_max)
-        else:
-            factor = rng.choice(cfg.speed_factors)
-        out = apply_speed_perturbation(out, sr, factor)
-    if noise_enabled:
-        out = maybe_add_noise(
-            out,
-            sr,
-            rng,
-            prob=cfg.noise_prob,
-            snr_min=cfg.noise_snr_min,
-            snr_max=cfg.noise_snr_max,
-            library=cfg.noise_library,
-        )
-    return out
+    if cfg.speed_factor_min is not None and cfg.speed_factor_max is not None:
+        factor = rng.uniform(cfg.speed_factor_min, cfg.speed_factor_max)
+    else:
+        factor = rng.choice(cfg.speed_factors)
+    return apply_speed_perturbation(wav.astype(np.float32, copy=False), sr, factor)
 
 
 def apply_specaugment(features: torch.Tensor, cfg: AudioAugmentConfig, rng: random.Random) -> torch.Tensor:
     """Mask mel features; expects shape (batch, n_mels, time) or (n_mels, time)."""
-    if not cfg.enabled or cfg._specaug_masks is None or rng.random() > cfg.specaug_prob:
+    if (
+        not cfg.enabled
+        or not cfg.specaug_enabled
+        or cfg._specaug_masks is None
+        or rng.random() > cfg.specaug_prob
+    ):
         return features
     time_masks, freq_masks = cfg._specaug_masks
     out = features.clone()
@@ -379,8 +348,6 @@ class DataCollatorForQwen3ASRFinetuning:
             ]
         else:
             targets = [f["target"] for f in features]
-        noise_flags = [int(f.get("noise_aug", 1)) for f in features]
-
         cfg = self.augment
         use_aug = cfg is not None and cfg.enabled
         rng = random.Random() if use_aug else None
@@ -391,15 +358,6 @@ class DataCollatorForQwen3ASRFinetuning:
         ]
         aug_flags = [int(f.get("aug", 1)) for f in features]
 
-        if use_aug and cfg.nospeech.enabled:
-            audios, targets = apply_nospeech_augment(
-                audios,
-                targets,
-                aug_flags,
-                rng,
-                cfg.nospeech,
-                self.sampling_rate,
-            )
         if self.strip_target_brackets:
             targets = [strip_target_brackets(target) for target in targets]
 
@@ -408,16 +366,10 @@ class DataCollatorForQwen3ASRFinetuning:
 
         if use_aug:
             audios = [
-                augment_waveform(
-                    wav,
-                    self.sampling_rate,
-                    cfg,
-                    rng,
-                    noise_enabled=bool(noise_aug),
-                )
+                augment_waveform(wav, self.sampling_rate, cfg, rng)
                 if aug == 1
                 else wav
-                for wav, aug, noise_aug in zip(audios, aug_flags, noise_flags)
+                for wav, aug in zip(audios, aug_flags)
             ]
 
         full_inputs, prefix_inputs = build_processor_batch_inputs(
@@ -1186,79 +1138,113 @@ def parse_args():
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--resume", type=int, default=0)
 
-    # Online audio augmentation (train only; default off)
-    p.add_argument("--augment", type=int, default=0, choices=(0, 1))
-    p.add_argument("--augment_prob", type=float, default=1.0)
-    p.add_argument("--speed_prob", type=float, default=0.5)
-    p.add_argument("--speed_factors", type=str, default="0.9,1.0,1.1")
-    p.add_argument("--speed_factor_min", type=float, default=None,
-                   help="If set with --speed_factor_max, sample the speed factor "
-                        "uniformly in [min,max] instead of the discrete --speed_factors list.")
-    p.add_argument("--speed_factor_max", type=float, default=None)
-    p.add_argument("--noise_prob", type=float, default=0.5)
-    p.add_argument("--noise_snr_min", type=float, default=5.0)
-    p.add_argument("--noise_snr_max", type=float, default=20.0)
-    p.add_argument(
-        "--noise_dir",
-        type=str,
-        default="",
-        help="Directory of real noise wavs (e.g. DNS-Challenge noise_fullband). "
-        "When set, AddNoise samples real noise files instead of synthetic white noise.",
-    )
-    p.add_argument("--specaug_prob", type=float, default=0.5)
-    p.add_argument("--specaug_time_mask_param", type=int, default=50)
-    p.add_argument("--specaug_freq_mask_param", type=int, default=27)
-    p.add_argument("--specaug_num_time_masks", type=int, default=2)
-    p.add_argument("--specaug_num_freq_masks", type=int, default=2)
-
-    # No-speech segment augmentation (train only; default off)
-    p.add_argument("--nospeech_augment", type=int, default=0, choices=(0, 1))
-    p.add_argument("--nospeech_prob", type=float, default=0.3)
-    p.add_argument("--nospeech_pad_min_sec", type=float, default=0.5)
-    p.add_argument("--nospeech_pad_max_sec", type=float, default=3.0)
-
     return p.parse_args()
 
 
-def build_training_pipeline(args_cli):
+@dataclass
+class TrainingData:
+    pipeline: Any
+    dataset: Any
+    sampler: Any
+    streaming: bool
+    augmentation: AudioAugmentConfig
+    service: Any = None
+
+    def start_service(self) -> None:
+        if self.service is not None:
+            self.service.start()
+
+    def close(self) -> None:
+        if self.service is not None:
+            self.service.close()
+            self.service = None
+
+
+def build_training_data(args_cli) -> TrainingData:
     if not args_cli.data_config:
         raise ValueError(
             "--data_config is required; legacy --train_file loading has been removed."
         )
-    from finetuning.data_pipeline import build_data_pipeline
+    from finetuning.data_pipeline import build_data_pipeline, build_stream_dataset
 
     pipeline = build_data_pipeline(args_cli.data_config)
-    if pipeline.is_streaming and args_cli.max_steps <= 0:
-        raise ValueError(
-            "--max_steps must be > 0 when --data_config uses WebDataset streaming."
+    if pipeline.config is None:
+        raise RuntimeError("Data pipeline config is missing.")
+    augmentation = AudioAugmentConfig.from_spec(pipeline.config.augmentation)
+    simulation = pipeline.config.augmentation.simulation
+    service = None
+    clean_pipeline = pipeline
+    if simulation.enabled:
+        clean_pipeline = (
+            pipeline
+            if pipeline.is_streaming
+            else build_stream_dataset(pipeline.config)
         )
+        if args_cli.max_steps <= 0:
+            raise ValueError(
+                "--max_steps must be > 0 when pseudo-online simulation is enabled."
+            )
+        from finetuning.augmentation.service import SimulationConfig, SimulationService
+
+        sim_config = SimulationConfig.from_spec(
+            simulation, sample_rate=pipeline.config.sample_rate
+        )
+        service = SimulationService(clean_pipeline.dataset, sim_config)
+        dataset = service.dataset
+        sampler = None
+        streaming = True
+    else:
+        dataset = pipeline.dataset
+        sampler = pipeline.sampler
+        streaming = pipeline.is_streaming
+        if streaming and args_cli.max_steps <= 0:
+            raise ValueError(
+                "--max_steps must be > 0 when --data_config uses WebDataset streaming."
+            )
     print(
-        "[data] mode=%s streaming=%s sources=%d shards=%d "
+        "[data] mode=%s streaming=%s simulation=%s sources=%d shards=%d "
         "estimated_samples=%s estimated_hours=%s"
         % (
-            pipeline.mode,
-            pipeline.is_streaming,
-            len(pipeline.sources),
-            len(pipeline.shards),
-            pipeline.estimated_samples,
-            pipeline.estimated_hours,
+            clean_pipeline.mode,
+            streaming,
+            simulation.enabled,
+            len(clean_pipeline.sources),
+            len(clean_pipeline.shards),
+            clean_pipeline.estimated_samples,
+            clean_pipeline.estimated_hours,
         )
     )
-    if pipeline.is_streaming and getattr(args_cli, "curriculum", False):
+    print(
+        "[augment] speed=%s prob=%.2f specaug=%s prob=%.2f"
+        % (
+            augmentation.speed_enabled,
+            augmentation.speed_prob,
+            augmentation.specaug_enabled,
+            augmentation.specaug_prob,
+        )
+    )
+    if streaming and getattr(args_cli, "curriculum", False):
         print(
             "[curriculum] streaming mode uses a single pass; "
             "curriculum switching may not trigger."
         )
-    return pipeline
+    return TrainingData(
+        pipeline=pipeline,
+        dataset=dataset,
+        sampler=sampler,
+        streaming=streaming,
+        augmentation=augmentation,
+        service=service,
+    )
 
 
 def main():
     args_cli = parse_args()
 
-    pipeline = build_training_pipeline(args_cli)
-    train_dataset = pipeline.dataset
-    custom_train_sampler = pipeline.sampler
-    streaming = pipeline.is_streaming
+    training_data = build_training_data(args_cli)
+    train_dataset = training_data.dataset
+    custom_train_sampler = training_data.sampler
+    streaming = training_data.streaming
 
     eval_dataset = None
     if args_cli.eval_file:
@@ -1291,7 +1277,7 @@ def main():
                 % (part, total, trainable)
             )
 
-    augment_cfg = AudioAugmentConfig.from_args(args_cli)
+    augment_cfg = training_data.augmentation
     train_collator = DataCollatorForQwen3ASRFinetuning(
         processor=processor,
         sampling_rate=args_cli.sr,
@@ -1402,38 +1388,27 @@ def main():
         lr_llm=args_cli.lr_llm,
     )
 
-    if trainer.args.process_index == 0 and augment_cfg.enabled:
-        print(
-            "[augment] enabled: speed_prob=%s noise_prob=%s specaug_prob=%s"
-            % (augment_cfg.speed_prob, augment_cfg.noise_prob, augment_cfg.specaug_prob)
-        )
-        if augment_cfg.noise_library is not None and augment_cfg.noise_library.enabled:
-            print(
-                "[augment] noise_dir=%s files=%d"
-                % (augment_cfg.noise_dir, augment_cfg.noise_library.num_files)
-            )
-        if augment_cfg.nospeech.enabled:
-            ns = augment_cfg.nospeech
-            print(
-                "[augment] nospeech_prob=%s pad=%.1f-%.1fs"
-                % (ns.prob, ns.pad_min_sec, ns.pad_max_sec)
-            )
-
     resume_from = (args_cli.resume_from or "").strip()
     if not resume_from and args_cli.resume == 1:
         resume_from = find_latest_checkpoint(training_args.output_dir) or ""
 
-    if resume_from:
-        if trainer.args.process_index == 0:
-            print(f"[resume] resume_from_checkpoint = {resume_from}")
-            if streaming:
-                print(
-                    "[resume] streaming data uses Trainer batch skipping; "
-                    "resume may re-iterate and discard some samples."
-                )
-        trainer.train(resume_from_checkpoint=resume_from)
-    else:
-        trainer.train()
+    try:
+        training_data.start_service()
+        if resume_from:
+            if trainer.args.process_index == 0:
+                print(f"[resume] resume_from_checkpoint = {resume_from}")
+                if streaming:
+                    print(
+                        "[resume] streaming data uses Trainer batch skipping; "
+                        "resume may re-iterate and discard some samples."
+                    )
+            trainer.train(resume_from_checkpoint=resume_from)
+        else:
+            trainer.train()
+    finally:
+        if trainer.args.process_index == 0 and training_data.service is not None:
+            print("[augment] service stats: %s" % training_data.service.snapshot())
+        training_data.close()
 
 
 if __name__ == "__main__":

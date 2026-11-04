@@ -73,16 +73,15 @@ class LoraSftRecipeTest(unittest.TestCase):
             batch = collator(features)
         return batch, augment, build
 
-    def test_collator_gates_noise_without_disabling_other_augmentation(self):
-        cfg = SimpleNamespace(enabled=True, nospeech=SimpleNamespace(enabled=False))
+    def test_collator_respects_aug_flag(self):
+        cfg = SimpleNamespace(enabled=True)
         features = [
-            {"audio": "a.wav", "target": "a", "prefix_text": "P", "aug": 1, "noise_aug": 0},
-            {"audio": "b.wav", "target": "b", "prefix_text": "P", "aug": 1, "noise_aug": 1},
-            {"audio": "c.wav", "target": "c", "prefix_text": "P", "aug": 0, "noise_aug": 1},
+            {"audio": "a.wav", "target": "a", "prefix_text": "P", "aug": 1},
+            {"audio": "b.wav", "target": "b", "prefix_text": "P", "aug": 1},
+            {"audio": "c.wav", "target": "c", "prefix_text": "P", "aug": 0},
         ]
         batch, augment, _ = self._collate(features, augment=cfg)
         self.assertEqual(augment.call_count, 2)
-        self.assertEqual([c.kwargs["noise_enabled"] for c in augment.call_args_list], [False, True])
         self.assertEqual(batch["labels"].tolist(), [[-100, -100, -100, 3, 4]] * 3)
 
     def test_collator_strips_bracket_glyphs_but_keeps_contents(self):
