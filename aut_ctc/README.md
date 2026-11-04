@@ -15,6 +15,7 @@ python -m aut_ctc.tests.test_frontend --real
 python -m aut_ctc.tests.test_tokenizer --sp_model /root/autodl-tmp/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model --texts texts.txt
 python -m aut_ctc.tests.test_model
 python -m aut_ctc.tests.test_streaming
+python -m aut_ctc.tests.test_biasing    # GPU：真实 Qwen3-ASR-1.7B + exp/mix3000h_stream
 # M2 数据报告（与训练同一套过滤逻辑），可选写出过滤后的清单；top_oov_chars 是 extra_chars.txt 的补字候选
 python -m aut_ctc.tools.data_stats --sp_model /root/autodl-tmp/models/SenseVoiceSmall/chn_jpn_yue_eng_ko_spectok.bpe.model \
     --manifests data/train_zh.jsonl data/train_en.jsonl --report exp/data_report.json
@@ -33,6 +34,33 @@ python -m aut_ctc.evaluate --exp_dir exp/stream --manifest data/dev_zh.jsonl --w
 ```
 
 流式识别：`StreamingRecognizer(AuTFrontend(...), decoder, tokenizer, window=200, left_chunks=4)`，`accept_waveform(pcm)` 返回 `{"final", "partial"}`，结束时调用 `finalize()`。
+
+## 推理：CTC-RAG 上下文偏置
+
+链路：AuT → AuT-CTC 粗识别（log-prob）→ `ctc_rag_hw` 热词检索 → 热词写进 system prompt → Qwen3-ASR 解码。每个 batch 只跑一次 AuT：用 LLM 自己的 `thinker.audio_tower`，`ln_post` 输出给 CTC，最终输出（proj2 之后）直接填进 LLM 输入嵌入的音频占位，`generate()` 不再编码音频。
+
+```python
+from aut_ctc.biasing import CTCRagQwen3ASR
+pipe = CTCRagQwen3ASR.from_pretrained("/root/autodl-tmp/models/Qwen3-ASR-1.7B", "exp/mix3000h_stream", "last",
+                                      hotwords="hotwords_lib.txt")   # retriever_device="gpu" 用 Triton
+res = pipe.transcribe(["a.wav", "b.wav"])   # 每条：text、ctc_text、hotwords、contexts；pipe.timings 是各阶段耗时
+pipe.transcribe("a.wav", context="")        # 固定 context（"" = 不偏置），跳过检索
+```
+
+```bash
+# demo：同一音频跑 不加 context / 检索热词 / 标准答案热词，打印转写、检索结果、热词出现次数和各阶段耗时
+T=/root/autodl-tmp/huangpu/ctc_rag_hw/examples/test_files
+python -m aut_ctc.tools.demo_biasing --exp_dir exp/mix3000h_stream --ckpt last --hotwords $T/hotwords_lib.txt \
+    --oracle $T/hotwords_surgery_0133.txt --audio $T/surgery_dialogue_0133.wav
+```
+
+- **不改 `qwen_asr`**（transformers 后端）：thinker 在 `input_features=None` 时跳过 AuT，首步位置编码只依赖 `attention_mask`，`generate(input_ids=…, inputs_embeds=…)` 原样透传；prompt 用 `_build_text_prompt` + `replace_multimodal_special_tokens`（按 AuT 帧数展开 `<|audio_pad|>`）+ 左 padding，与 `Qwen3ASRModel.transcribe` 相同。vLLM 的模型类只收 mel 特征，要支持需在 `vllm_backend/qwen3_asr.py` 加嵌入输入。
+- **一致性**（`test_biasing`）：单条 AuT 输出与 `get_audio_features` 逐位相同；打包 batch 在 fp32 下差 1.5e-6（精确），bf16 下差 1.5e-2（舍入）；给 generate 路径喂官方 AuT 输出时与 `transcribe` 逐字相同。
+- **AuT 必须是训练 CTC 时那份**：构造时用 `meta.json` 的 `aut_fingerprint` 核对 LLM 的 checkpoint，不一致直接报错（例如微调过 AuT 的模型）。
+- **切段与批处理**：长音频在低能量处切成 ≤ `max_segment_sec`（30 s）的段，每段单独检索、单独拼 context（检索耗时随查询长度增长）；按补齐后总时长（240 s）和条数（8，限制 LLM prefill 显存）组 batch。
+- **`ctc_rag_hw` 适配**：`CTCRagTokenizer` 预先算好整张 piece 表（它每次调用都对全词表 `decode([i])`，我们的表 7.5 ms）；词首 `▁` 换成空格（它的雷达自己去掉 `▁`，greedy 拼接不加分隔符），blank/unk/标签解码为空；`frame_shift_ms` = 1000/13。context 用空格连接热词（同官方示例），每段最多 `max_hotwords`（30）个。
+- **实测**（131 s 手术对话，热词库 2,280 条，5 段，峰值显存 5.1 GB）：AuT 约 30 ms、CTC 约 15 ms、检索约 450–480 ms（CPU；GPU/Triton 约 425 ms）、LLM 约 2.0 s，RTF 0.016（不检索）/ 0.019（检索）。标准答案 14 个热词在转写里的出现次数：不加 context 36，检索 40，标准答案作 context 42；检索召回 12/14（共检索出 111 个）；每段只取 10 个时召回 8/14、出现次数 37。
+- **检索耗时构成**（每段约 85–120 ms）：雷达扫描约 40–60 ms，雷达每次调用重建（全词表小写化 + 热词 trie）约 18 ms，全词表 id→token 约 7.5 ms，音素纠错 15–19 ms（Triton 只加速这一步）。前两项可以在 `ctc_rag_hw` 里按热词表/词表缓存。
 
 ## 数据（ModelScope 上的 WebDataset 分片）
 
@@ -74,4 +102,4 @@ SenseVoiceSmall 词表裁成中英紧凑子集，再补回方言相关的部分�
 
 ## 测试状态
 
-T1–T20 通过：T7–T10 用真实 SenseVoiceSmall `.bpe.model`（ModelScope `iic/SenseVoiceSmall`，sha256 已核对）；T20 用合成词表在 MagicData 上海话 50 条上过拟合（MER 0）。T21 依赖未实现的特征缓存。
+T1–T20 通过：T7–T10 用真实 SenseVoiceSmall `.bpe.model`（ModelScope `iic/SenseVoiceSmall`，sha256 已核对）；T20 用合成词表在 MagicData 上海话 50 条上过拟合（MER 0）。T21 依赖未实现的特征缓存。B1–B4（`test_biasing`，偏置链路）通过。

@@ -108,7 +108,8 @@ def aut_fingerprint(model_dir) -> str:
 
 
 @torch.no_grad()  # not inference_mode: inference tensors cannot be saved for backward by the decoder
-def extract_aut_features(aut, input_features, mel_lens, layer_ids=(-1,), n_window_infer: int = 800):
+def extract_aut_features(aut, input_features, mel_lens, layer_ids=(-1,), n_window_infer: int = 800,
+                         return_output: bool = False):
     """Run the frozen AuT on a padded batch -> ([(B, T, D) for each id in layer_ids], lens).
 
     The batch is packed along time (the AuT forward takes concatenated mel + per-utterance lengths),
@@ -116,6 +117,8 @@ def extract_aut_features(aut, input_features, mel_lens, layer_ids=(-1,), n_windo
     layer_ids: -1 = ln_post output (before proj1/proj2); i >= 0 = output of transformer layer i
     (0-based, un-normalized residual stream).
     n_window_infer: 100/200/400/800 mel frames -> 1/2/4/8 s attention windows.
+    return_output: also return the AuT's own output (after proj1/proj2, i.e. the LLM's audio embeddings) of the
+    same forward as a third item, [(T_i, output_dim)] per utterance.
     """
     assert n_window_infer % AUT_MEL_PER_CHUNK == 0, n_window_infer
     aut.n_window_infer = n_window_infer
@@ -135,13 +138,15 @@ def extract_aut_features(aut, input_features, mel_lens, layer_ids=(-1,), n_windo
             module.register_forward_hook(lambda m, args, out, i=i: grabbed.__setitem__(i, out if i < 0 else out[0]))
         )
     try:
-        aut(packed.to(device=param.device, dtype=param.dtype), feature_lens=feature_lens)
+        out = aut(packed.to(device=param.device, dtype=param.dtype), feature_lens=feature_lens)
     finally:
         for h in hooks:
             h.remove()
     lens = aut_output_lengths(mel_lens)
     split = aut_output_lengths(feature_lens).tolist()
     feats = [nn.utils.rnn.pad_sequence(grabbed[i].split(split)[: len(lens)], batch_first=True) for i in layer_ids]
+    if return_output:
+        return feats, lens, list(out.last_hidden_state.split(split)[: len(lens)])
     return feats, lens
 
 
