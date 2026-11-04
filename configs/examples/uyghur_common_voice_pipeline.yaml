@@ -12,6 +12,8 @@ dataset:
   split_seed: 42
 
 training:
+  data_config: configs/data_configs/uyghur_common_voice.yaml
+  eval_file: data/uyghur/common_voice_pipeline/dev.jsonl
   model_path: Qwen/Qwen3-ASR-1.7B
   output_dir: outputs/ug_common_voice_sft
   batch_size: 4

@@ -24,6 +24,7 @@ dataset:
   check_audio: 1
 
 training:
+  data_config: configs/data_configs/plus0821_sft.yaml
   model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
   output_dir: outputs/poc_train_real_llm_syn_cantonese_num_measure_tts_pathology_full_testdev_cer_sft_nodual_curated_fullvoice_clean_v2synth_yt_plus0821_fromscratch600
   batch_size: 2

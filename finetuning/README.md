@@ -50,12 +50,29 @@ Language prefix recommendation:
 Note:
 - If you set `language None`, the model will not learn language detection from that prefix.
 
-### 3) Fine-tune (single GPU)
+### 3) Data config (required)
+
+Both SFT scripts now require a data-pipeline config. Minimal local JSONL example:
+
+```yaml
+data:
+  sources:
+    - name: train
+      backend: jsonl
+      path: ./train.jsonl
+      text_template: raw
+  mixture:
+    seed: 42
+```
+
+Use `text_template: "language {language}<asr_text>{text}"` when the JSONL `text` field contains a bare transcript instead of a full Qwen3 label. WebDataset and ModelScope sources are configured in the same file; streaming sources also require `--max_steps`.
+
+### 4) Fine-tune (single GPU)
 
 ```bash
 python qwen3_asr_sft.py \
   --model_path Qwen/Qwen3-ASR-1.7B \
-  --train_file ./train.jsonl \
+  --data_config ./data.yaml \
   --output_dir ./qwen3-asr-finetuning-out \
   --batch_size 32 \
   --grad_acc 4 \
@@ -68,13 +85,13 @@ python qwen3_asr_sft.py \
 Checkpoints will be written to:
 - `./qwen3-asr-finetuning-out/checkpoint-<global_step>`
 
-### 4) Fine-tune (multi GPU with torchrun)
+### 5) Fine-tune (multi GPU with torchrun)
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
 torchrun --nproc_per_node=2 qwen3_asr_sft.py \
   --model_path Qwen/Qwen3-ASR-1.7B \
-  --train_file ./train.jsonl \
+  --data_config ./data.yaml \
   --output_dir ./qwen3-asr-finetuning-out \
   --batch_size 32 \
   --grad_acc 4 \
@@ -83,13 +100,13 @@ torchrun --nproc_per_node=2 qwen3_asr_sft.py \
   --save_steps 200
 ```
 
-### 5) Resume training
+### 6) Resume training
 
 Option A: explicitly set a checkpoint path:
 
 ```bash
 python qwen3_asr_sft.py \
-  --train_file ./train.jsonl \
+  --data_config ./data.yaml \
   --output_dir ./qwen3-asr-finetuning-out \
   --resume_from ./qwen3-asr-finetuning-out/checkpoint-200
 ```
@@ -98,12 +115,12 @@ Option B: automatically resume from the latest checkpoint under `output_dir`:
 
 ```bash
 python qwen3_asr_sft.py \
-  --train_file ./train.jsonl \
+  --data_config ./data.yaml \
   --output_dir ./qwen3-asr-finetuning-out \
   --resume 1
 ```
 
-### 6) Quick inference test
+### 7) Quick inference test
 
 ```python
 import torch
@@ -132,13 +149,13 @@ set -e
 export CUDA_VISIBLE_DEVICES=0,1
 
 MODEL_PATH="Qwen/Qwen3-ASR-1.7B"
-TRAIN_FILE="./train.jsonl"
+DATA_CONFIG="./data.yaml"
 EVAL_FILE="./eval.jsonl"
 OUTPUT_DIR="./qwen3-asr-finetuning-out"
 
 torchrun --nproc_per_node=2 qwen3_asr_sft.py \
   --model_path ${MODEL_PATH} \
-  --train_file ${TRAIN_FILE} \
+  --data_config ${DATA_CONFIG} \
   --eval_file ${EVAL_FILE} \
   --output_dir ${OUTPUT_DIR} \
   --batch_size 32 \

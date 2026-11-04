@@ -112,8 +112,8 @@ python tools/qwen3_asr_pipeline.py --config CONFIG.yaml --stage all --dry_run 1
 ## 训练入口速查
 
 - 脚本：`finetuning/qwen3_asr_sft.py`
-- 数据：`load_dataset("json", data_files=...)`，必需 `audio` + `text`
-- 常用参数：`--model_path`、`--train_file`、`--eval_file`、`--output_dir`、`--sr`、`--batch_size`、`--grad_acc`、`--lr`、`--epochs`、`--save_steps`、`--resume` / `--resume_from`
+- 数据：`--data_config` YAML（`finetuning/data_pipeline`），支持 JSONL、本地 WebDataset、ModelScope WebDataset
+- 常用参数：`--model_path`、`--data_config`、`--eval_file`、`--output_dir`、`--max_steps`（仅流式）、`--sr`、`--batch_size`、`--grad_acc`、`--lr`、`--epochs`、`--save_steps`、`--resume` / `--resume_from`
 - 在线增强（默认关闭，只用于 train collator，不用于 eval）：`--augment 1` 开启；常用参数 `--augment_prob`、`--speed_prob`、`--speed_factors`、`--noise_prob`、`--noise_snr_min`、`--noise_snr_max`、`--specaug_prob`、`--specaug_time_mask_param`、`--specaug_freq_mask_param`、`--specaug_num_time_masks`、`--specaug_num_freq_masks`。pipeline YAML 中写在 `training:` 下会透传给训练脚本。
 
 增强建议：

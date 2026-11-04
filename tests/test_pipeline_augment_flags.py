@@ -22,6 +22,7 @@ dataset:
   train_jsonl: data/example/train.jsonl
   dev_jsonl: data/example/dev.jsonl
 training:
+  data_config: configs/data_configs/example.yaml
   output_dir: outputs/example
   strip_target_brackets: 1
   augment: 1

@@ -21,26 +21,30 @@ import json
 import math
 import re
 import shutil
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from datasets import load_dataset
 from qwen_asr import Qwen3ASRModel
 from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 # Share the SFT data recipe and generation metric for controlled comparisons.
 if __package__:
     from .qwen3_asr_sft import (
         AudioAugmentConfig, DataCollatorForQwen3ASRFinetuning,
         KeepBestWerCheckpointsCallback, _load_extra_eval_items,
-        make_preprocess_fn_prefix_only,
+        build_training_pipeline,
     )
 else:
     from qwen3_asr_sft import (
         AudioAugmentConfig, DataCollatorForQwen3ASRFinetuning,
         KeepBestWerCheckpointsCallback, _load_extra_eval_items,
-        make_preprocess_fn_prefix_only,
+        build_training_pipeline,
     )
 
 # Audio attention projections live in self_attn; fc1/fc2 are direct layer children.
@@ -167,13 +171,19 @@ def find_latest_checkpoint(output_dir: str) -> Optional[str]:
     return best_path
 
 class CastFloatInputsTrainer(Trainer):
-    def __init__(self, *args, eval_data_collator=None, lr_encoder=2e-5, lr_aligner=2e-5,
-                 lr_llm=2e-5, **kwargs):
+    def __init__(self, *args, eval_data_collator=None, custom_train_sampler=None,
+                 lr_encoder=2e-5, lr_aligner=2e-5, lr_llm=2e-5, **kwargs):
         self.eval_data_collator = eval_data_collator
+        self.custom_train_sampler = custom_train_sampler
         self.lr_encoder = lr_encoder
         self.lr_aligner = lr_aligner
         self.lr_llm = lr_llm
         super().__init__(*args, **kwargs)
+
+    def _get_train_sampler(self, train_dataset=None):
+        if self.custom_train_sampler is not None:
+            return self.custom_train_sampler
+        return super()._get_train_sampler(train_dataset)
 
     def _prepare_inputs(self, inputs):
         inputs = super()._prepare_inputs(inputs)
@@ -421,7 +431,18 @@ def parse_args():
 
     # Paths
     p.add_argument("--model_path", type=str, default="Qwen/Qwen3-ASR-1.7B")
-    p.add_argument("--train_file", type=str, default="train.jsonl")
+    p.add_argument(
+        "--data_config",
+        type=str,
+        required=True,
+        help="YAML data-pipeline config (JSONL / WebDataset, local or ModelScope).",
+    )
+    p.add_argument(
+        "--max_steps",
+        type=int,
+        default=-1,
+        help="Positive max steps. Required for streaming WebDataset.",
+    )
     p.add_argument("--eval_file", type=str, default="")
     p.add_argument("--extra_eval_set", action="append", default=[],
                    help="Additional reporting set as NAME=PATH (jsonl/csv).")
@@ -521,8 +542,16 @@ def parse_args():
 def main():
     args_cli = parse_args()
 
-    if not args_cli.train_file:
-        raise ValueError("TRAIN_FILE is required (json/jsonl). Needs fields: audio, text, optional prompt")
+    pipeline = build_training_pipeline(args_cli)
+    train_dataset = pipeline.dataset
+    custom_train_sampler = pipeline.sampler
+    streaming = pipeline.is_streaming
+
+    eval_dataset = None
+    if args_cli.eval_file:
+        from finetuning.data_pipeline import build_eval_dataset
+
+        eval_dataset = build_eval_dataset(args_cli.eval_file, sample_rate=args_cli.sr)
 
     use_bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
     asr_wrapper = Qwen3ASRModel.from_pretrained(
@@ -542,26 +571,6 @@ def main():
         print("[lora] scope=%s r=%d alpha=%d dropout=%s"
               % (args_cli.lora_scope, args_cli.lora_r, args_cli.lora_alpha, args_cli.lora_dropout))
 
-    # Load splits separately so manifests with different column sets (e.g.
-    # RAFT rows) don't hit the multi-split schema-unification CastError.
-    raw_ds = {
-        "train": load_dataset("json", data_files=str(args_cli.train_file), split="train")
-    }
-    if args_cli.eval_file:
-        raw_ds["validation"] = load_dataset(
-            "json", data_files=str(args_cli.eval_file), split="train"
-        )
-    ds = {
-        split: raw_split.map(make_preprocess_fn_prefix_only(processor), num_proc=1)
-        for split, raw_split in raw_ds.items()
-    }
-
-    keep = {"prompt", "audio", "target", "prefix_text", "aug", "noise_aug"}
-    for split in ds.keys():
-        drop = [c for c in ds[split].column_names if c not in keep]
-        if drop:
-            ds[split] = ds[split].remove_columns(drop)
-
     augment_cfg = AudioAugmentConfig.from_args(args_cli)
     train_collator = DataCollatorForQwen3ASRFinetuning(
         processor=processor,
@@ -576,10 +585,10 @@ def main():
         strip_target_brackets=bool(args_cli.strip_target_brackets),
     )
 
-    keep_best_limit = args_cli.save_best_total_limit if args_cli.eval_file else 0
-    if args_cli.save_best_total_limit > 0 and not args_cli.eval_file:
+    keep_best_limit = args_cli.save_best_total_limit if eval_dataset is not None else 0
+    if args_cli.save_best_total_limit > 0 and eval_dataset is None:
         raise ValueError("--save_best_total_limit requires --eval_file")
-    if args_cli.save_best_metric in {"wer", "cer"} and not args_cli.eval_file:
+    if args_cli.save_best_metric in {"wer", "cer"} and eval_dataset is None:
         raise ValueError("--save_best_metric wer/cer requires --eval_file")
 
     training_args = TrainingArguments(
@@ -588,20 +597,25 @@ def main():
         gradient_accumulation_steps=args_cli.grad_acc,
         learning_rate=args_cli.lr,
         num_train_epochs=args_cli.epochs,
+        max_steps=args_cli.max_steps,
         logging_steps=args_cli.log_steps,
         lr_scheduler_type=args_cli.lr_scheduler_type,
         warmup_ratio=args_cli.warmup_ratio,
         dataloader_num_workers=args_cli.num_workers,
         dataloader_pin_memory=(args_cli.pin_memory == 1),
-        dataloader_persistent_workers=(args_cli.persistent_workers == 1),
+        dataloader_persistent_workers=(
+            args_cli.persistent_workers == 1
+            and args_cli.num_workers > 0
+            and not streaming
+        ),
         dataloader_prefetch_factor=args_cli.prefetch_factor if args_cli.num_workers > 0 else None,
         save_strategy=args_cli.save_strategy,
         save_steps=args_cli.save_steps,
         save_total_limit=None if keep_best_limit > 0 else args_cli.save_total_limit,
         save_safetensors=True,
-        eval_strategy="steps" if args_cli.eval_file else "no",
-        eval_steps=args_cli.save_steps if args_cli.eval_file else None,
-        do_eval=bool(args_cli.eval_file),
+        eval_strategy="steps" if eval_dataset is not None else "no",
+        eval_steps=args_cli.save_steps if eval_dataset is not None else None,
+        do_eval=eval_dataset is not None,
         bf16=use_bf16,
         fp16=not use_bf16,
         ddp_find_unused_parameters=False,
@@ -615,7 +629,7 @@ def main():
             callbacks.append(KeepBestWerCheckpointsCallback(
                 limit=keep_best_limit,
                 asr_wrapper=asr_wrapper,
-                eval_dataset=ds.get("validation"),
+                eval_dataset=eval_dataset,
                 sr=args_cli.sr,
                 wer_eval_samples=args_cli.wer_eval_samples,
                 wer_batch_size=args_cli.wer_batch_size,
@@ -628,7 +642,7 @@ def main():
         else:
             callbacks.append(KeepBestCheckpointsCallback(limit=keep_best_limit))
     if args_cli.early_stopping_patience > 0:
-        if not args_cli.eval_file:
+        if eval_dataset is None:
             raise ValueError("--early_stopping_patience requires --eval_file")
         callbacks.append(
             StopOnEvalLossPlateauCallback(
@@ -640,10 +654,11 @@ def main():
     trainer = CastFloatInputsTrainer(
         model=model,
         args=training_args,
-        train_dataset=ds["train"],
-        eval_dataset=ds.get("validation", None),
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=train_collator,
-        eval_data_collator=eval_collator if args_cli.eval_file else None,
+        eval_data_collator=eval_collator if eval_dataset is not None else None,
+        custom_train_sampler=custom_train_sampler,
         tokenizer=processor.tokenizer,
         callbacks=callbacks,
         lr_encoder=args_cli.lr_encoder,
@@ -675,6 +690,11 @@ def main():
     if resume_from:
         if trainer.args.process_index == 0:
             print(f"[resume] resume_from_checkpoint = {resume_from}")
+            if streaming:
+                print(
+                    "[resume] streaming data uses Trainer batch skipping; "
+                    "resume may re-iterate and discard some samples."
+                )
         trainer.train(resume_from_checkpoint=resume_from)
     else:
         trainer.train()

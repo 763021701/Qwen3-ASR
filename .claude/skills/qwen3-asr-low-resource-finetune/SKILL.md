@@ -124,8 +124,8 @@ Do NOT modify `finetuning/qwen3_asr_sft.py` or `finetuning/qwen3_asr_sft_lora.py
 - **Full fine-tune**: `finetuning/qwen3_asr_sft.py`
 - **LoRA fine-tune**: `finetuning/qwen3_asr_sft_lora.py`
 - **LoRA merge**: `tools/merge_lora.py` (merge adapter into base → standalone checkpoint)
-- **Data**: `load_dataset("json", data_files=...)` — requires `audio` + `text`
-- **Key args (full)**: `--model_path`, `--train_file`, `--eval_file`, `--output_dir`, `--sr`, `--batch_size`, `--grad_acc`, `--lr`, `--epochs`, `--save_steps`, `--freeze_audio_tower`, `--resume` / `--resume_from`
+- **Data**: `--data_config` YAML via `finetuning/data_pipeline` — JSONL, local WebDataset, or ModelScope WebDataset
+- **Key args (full)**: `--model_path`, `--data_config`, `--eval_file`, `--output_dir`, `--max_steps` (streaming only), `--sr`, `--batch_size`, `--grad_acc`, `--lr`, `--epochs`, `--save_steps`, `--freeze_audio_tower`, `--resume` / `--resume_from`
 - **Key args (LoRA)**: same basic args plus `--lora_scope`, `--lora_r`, `--lora_alpha`, `--lora_dropout`, `--merge_lora_into_base_from`, `--lr_encoder`, `--lr_aligner`, `--lr_llm`
 - **Online augmentation** (default off, train collator only; available in both scripts): `--augment 1` to enable; `--augment_prob`, `--speed_prob`, `--speed_factors`, `--noise_prob`, `--noise_snr_min`, `--noise_snr_max`, `--specaug_prob`, `--specaug_time_mask_param`, `--specaug_freq_mask_param`, `--specaug_num_time_masks`, `--specaug_num_freq_masks`. In pipeline YAML, write under `training:`.
 

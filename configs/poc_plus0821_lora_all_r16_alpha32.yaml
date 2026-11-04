@@ -27,6 +27,7 @@ runtime:
   nproc_per_node: 1
   resume: false
 training:
+  data_config: configs/data_configs/plus0821_sft.yaml
   augment: 1
   augment_prob: 1.0
   batch_size: 2

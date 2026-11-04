@@ -494,12 +494,14 @@ def stage_validate(config: Dict[str, Any], dry_run: bool) -> None:
 def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
     training = config.get("training", {})
     runtime = config.get("runtime", {})
-    paths = manifest_paths(config)
     output_dir = abspath(str(training.get("output_dir", "outputs/qwen3_asr_pipeline")))
     if not dry_run:
         save_resolved_config(config, output_dir)
 
     use_lora = int(training.get("use_lora", 0)) == 1
+    data_config = str(training.get("data_config") or "").strip()
+    if not data_config:
+        raise ValueError("training.data_config is required.")
     script_name = "qwen3_asr_sft_lora.py" if use_lora else "qwen3_asr_sft.py"
     train_script = abspath(os.path.join("finetuning", script_name))
     launcher = str(runtime.get("launcher", "python")).strip()
@@ -517,6 +519,7 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "lr_scheduler_type": "--lr_scheduler_type",
         "warmup_ratio": "--warmup_ratio",
         "epochs": "--epochs",
+        "max_steps": "--max_steps",
         "freeze_audio_tower": "--freeze_audio_tower",
         "freeze_modules": "--freeze_modules",
         "strip_target_brackets": "--strip_target_brackets",
@@ -566,7 +569,12 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "lr_aligner": "--lr_aligner",
         "lr_llm": "--lr_llm",
     }
-    cmd.extend(["--train_file", paths["train"], "--eval_file", paths["dev"], "--output_dir", output_dir])
+    cmd.extend(["--data_config", abspath(data_config), "--output_dir", output_dir])
+    eval_file = str(training.get("eval_file") or "").strip()
+    if not eval_file:
+        eval_file = str((config.get("dataset") or {}).get("dev_jsonl") or "").strip()
+    if eval_file:
+        cmd.extend(["--eval_file", abspath(eval_file)])
     for key, flag in option_map.items():
         val = training.get(key)
         if val is not None and key in training:

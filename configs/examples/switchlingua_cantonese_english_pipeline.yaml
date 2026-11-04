@@ -16,6 +16,8 @@ dataset:
   # max_samples: 512  # optional cap for smoke tests; omit or 0 for full CSV
 
 training:
+  data_config: configs/data_configs/switchlingua_cantonese_english.yaml
+  eval_file: data/switchlingua/cantonese_english/dev.jsonl
   model_path: Qwen/Qwen3-ASR-1.7B
   output_dir: outputs/switchlingua_cantonese_en_sft
   batch_size: 2

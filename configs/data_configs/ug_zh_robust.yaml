@@ -1,0 +1,10 @@
+# Data config for scripts/train_ug_zh_robust.sh.
+data:
+  sources:
+    - name: ug_zh_combined
+      backend: jsonl
+      path: ../../data/combined_ug_zh/train.jsonl
+      text_template: raw
+      weight: 1.0
+  mixture:
+    seed: 42

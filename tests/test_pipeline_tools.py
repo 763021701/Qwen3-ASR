@@ -109,7 +109,7 @@ runtime:
             self.assertEqual(config["dataset"]["language"], "Uyghur")
             self.assertTrue(paths["train"].endswith(os.path.join("data", "example", "train.jsonl")))
             self.assertTrue(paths["dev"].endswith(os.path.join("data", "example", "dev.jsonl")))
-            self.assertTrue(paths["test"].endswith(os.path.join("data", "example", "test.jsonl")))
+            self.assertNotIn("test", paths)
 
 
 if __name__ == "__main__":

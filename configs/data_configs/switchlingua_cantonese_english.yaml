@@ -1,0 +1,10 @@
+# Data config for configs/examples/switchlingua_cantonese_english_pipeline.yaml.
+data:
+  sources:
+    - name: switchlingua_cantonese_english
+      backend: jsonl
+      path: ../../data/switchlingua/cantonese_english/train.jsonl
+      text_template: raw
+      weight: 1.0
+  mixture:
+    seed: 42

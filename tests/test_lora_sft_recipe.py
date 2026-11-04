@@ -17,6 +17,7 @@ class LoraSftRecipeTest(unittest.TestCase):
     def test_accepts_sft_selection_and_label_options(self):
         argv = [
             "lora", "--use_lora", "1", "--lora_scope", "all",
+            "--data_config", "data.yaml",
             "--lora_r", "16", "--lora_alpha", "32", "--lora_dropout", "0.05",
             "--strip_target_brackets", "1", "--save_best_metric", "cer",
             "--wer_eval_samples", "0", "--wer_batch_size", "2",
@@ -24,6 +25,7 @@ class LoraSftRecipeTest(unittest.TestCase):
         ]
         with patch.object(sys, "argv", argv):
             args = lora.parse_args()
+        self.assertEqual(args.data_config, "data.yaml")
         self.assertEqual(args.save_best_metric, "cer")
         self.assertEqual(args.strip_target_brackets, 1)
         self.assertEqual(args.wer_eval_samples, 0)
@@ -45,8 +47,10 @@ class LoraSftRecipeTest(unittest.TestCase):
             self.assertEqual(adapter.defaults[key], baseline.defaults[key])
 
     def test_preprocess_preserves_per_sample_noise_flag(self):
+        from finetuning.qwen3_asr_sft import make_preprocess_fn_prefix_only
+
         processor = SimpleNamespace(apply_chat_template=lambda *a, **k: ["prefix"])
-        preprocess = lora.make_preprocess_fn_prefix_only(processor)
+        preprocess = make_preprocess_fn_prefix_only(processor)
         for flag in (0, 1):
             with self.subTest(noise_aug=flag):
                 row = preprocess({"audio": "sample.wav", "text": "text", "noise_aug": flag})

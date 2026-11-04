@@ -12,7 +12,7 @@ cd /root/autodl-tmp/workspace/project/Qwen3-ASR-FT
 
 MODEL="/root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5"
 OUT="outputs/ug_zh_robust"
-TRAIN="data/combined_ug_zh/train.jsonl"
+DATA_CONFIG="configs/data_configs/ug_zh_robust.yaml"
 DEV="data/combined_ug_zh/dev.jsonl"
 
 mkdir -p "$OUT/logs"
@@ -20,7 +20,7 @@ mkdir -p "$OUT/logs"
 # shellcheck disable=SC2086
 /root/autodl-tmp/miniconda3/envs/qwen3_asr_ft/bin/python -u finetuning/qwen3_asr_sft.py \
   --model_path "$MODEL" \
-  --train_file "$TRAIN" \
+  --data_config "$DATA_CONFIG" \
   --eval_file "$DEV" \
   --output_dir "$OUT" \
   --batch_size 4 --grad_acc 8 --lr 2e-5 --epochs 3 \

@@ -1,0 +1,10 @@
+# Data config for configs/examples/uyghur_common_voice_pipeline.yaml.
+data:
+  sources:
+    - name: uyghur_common_voice
+      backend: jsonl
+      path: ../../data/uyghur/common_voice_pipeline/train.jsonl
+      text_template: raw
+      weight: 1.0
+  mixture:
+    seed: 42

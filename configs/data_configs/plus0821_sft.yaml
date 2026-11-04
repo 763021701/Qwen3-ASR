@@ -1,0 +1,10 @@
+# Local JSONL data config for the plus0821 SFT / LoRA recipes.
+data:
+  sources:
+    - name: plus0821
+      backend: jsonl
+      path: ../../data/poc_train_fullvoice_clean_v2synth_yt_plus0821/train.jsonl
+      text_template: raw
+      weight: 1.0
+  mixture:
+    seed: 42
