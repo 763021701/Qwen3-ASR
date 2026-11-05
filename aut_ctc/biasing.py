@@ -46,12 +46,15 @@ class CTCRagTokenizer:
 
 
 def hotword_context(hotwords) -> str:
-    """System prompt for a hotword list, as in the Hugging Face Qwen3-ASR example: "Vocabulary: w1, w2." ("" for none).
+    """System prompt for a hotword list in the Hugging Face Qwen3-ASR example's format, list reversed:
+    "Vocabulary: w3, w2, w1." ("" for none).
 
     With a bare space-separated list, short segments sometimes come back as the list itself instead of a transcript;
-    this format makes that much rarer at the same hotword gains (README, "热词格式与抄写").
+    this format makes that much rarer at the same hotword gains (README, "热词格式与抄写"). The retriever ranks its
+    best match for the first spoken word first, and the model tends to write that word and then follow the list;
+    reversed, recitations and wrongly inserted hotwords drop by about 80% (README, "热词顺序").
     """
-    return "Vocabulary: " + ", ".join(hotwords) + "." if hotwords else ""
+    return "Vocabulary: " + ", ".join(reversed(hotwords)) + "." if hotwords else ""
 
 
 @dataclass

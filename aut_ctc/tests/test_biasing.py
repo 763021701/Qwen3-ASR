@@ -49,8 +49,8 @@ def main():
     assert table.decode(tok.encode("hello world 2024年")) == " hello world 2024年"
     assert table.decode(tok.encode("今天天气不错")) == "今天天气不错"
     assert table.decode([tok.BLANK, tok.UNK, tok.tag_id("<|yue|>")]) == ""
-    assert hotword_context(["腹腔镜", "Trocar"]) == "Vocabulary: 腹腔镜, Trocar." and hotword_context([]) == ""
-    print("B1 ok: pieces keep word boundaries, blank/unk/tags decode to ''; context 'Vocabulary: w1, w2.'", flush=True)
+    assert hotword_context(["腹腔镜", "Trocar"]) == "Vocabulary: Trocar, 腹腔镜." and hotword_context([]) == ""
+    print("B1 ok: pieces keep word boundaries, blank/unk/tags decode to ''; context 'Vocabulary: w2, w1.'", flush=True)
 
     wavs = dev_clips()
     feats, mel_lens = compute_features(asr.processor.feature_extractor, wavs)
