@@ -20,7 +20,7 @@ import yaml
 
 from qwen_asr.inference.utils import SAMPLE_RATE, normalize_audios
 
-from ..biasing import CTCRagQwen3ASR
+from ..biasing import CTCRagQwen3ASR, hotword_context
 from ..train import cap_gpu_memory
 
 
@@ -55,7 +55,7 @@ def main():
     oracle = [w.strip() for w in open(args.oracle, encoding="utf-8") if w.strip()] if args.oracle else []
     runs = {"none": dict(context=""), "rag": {}}
     if oracle:
-        runs["oracle"] = dict(context=" ".join(oracle))
+        runs["oracle"] = dict(context=hotword_context(oracle))
     pipe.transcribe([(wavs[0][: 5 * SAMPLE_RATE], SAMPLE_RATE)])  # warm-up: CUDA kernels, retrieval caches
 
     out_f = open(args.out, "w", encoding="utf-8") if args.out else None

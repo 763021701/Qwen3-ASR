@@ -1,7 +1,8 @@
 """Biasing pipeline tests on the real Qwen3-ASR-1.7B and an AuT-CTC experiment (GPU):
-B1 the ctc_rag_hw piece table; B2 the shared AuT pass returns the LLM's own audio embeddings (bit-exact for one
-utterance, bf16 noise when packed); B3 fed the LLM's own embeddings, the pipeline's generate path transcribes exactly
-like Qwen3ASRModel.transcribe; B4 the AuT runs once per batch and generate() never re-encodes the audio.
+B1 the ctc_rag_hw piece table and the hotword context format; B2 the shared AuT pass returns the LLM's own audio
+embeddings (bit-exact for one utterance, bf16 noise when packed); B3 fed the LLM's own embeddings, the pipeline's
+generate path transcribes exactly like Qwen3ASRModel.transcribe; B4 the AuT runs once per batch and generate() never
+re-encodes the audio.
   python -m aut_ctc.tests.test_biasing [--exp_dir exp/mix3000h_stream --ckpt last]"""
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import torch
 
 from qwen_asr.inference.utils import parse_asr_output
 
-from ..biasing import CTCRagQwen3ASR, CTCRagTokenizer
+from ..biasing import CTCRagQwen3ASR, CTCRagTokenizer, hotword_context
 from ..data import read_audio
 from ..frontend import compute_features, extract_aut_features
 from ..train import cap_gpu_memory
@@ -47,7 +48,8 @@ def main():
     assert table.decode(tok.encode("hello world 2024年")) == " hello world 2024年"
     assert table.decode(tok.encode("今天天气不错")) == "今天天气不错"
     assert table.decode([tok.BLANK, tok.UNK, tok.tag_id("<|yue|>")]) == ""
-    print("B1 ok: pieces keep word boundaries, blank/unk/tags decode to ''", flush=True)
+    assert hotword_context(["腹腔镜", "Trocar"]) == "Vocabulary: 腹腔镜, Trocar." and hotword_context([]) == ""
+    print("B1 ok: pieces keep word boundaries, blank/unk/tags decode to ''; context 'Vocabulary: w1, w2.'", flush=True)
 
     wavs = dev_clips()
     feats, mel_lens = compute_features(asr.processor.feature_extractor, wavs)

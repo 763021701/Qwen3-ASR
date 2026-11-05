@@ -58,8 +58,9 @@ python -m aut_ctc.tools.demo_biasing --exp_dir exp/mix3000h_stream --ckpt last -
 - **一致性**（`test_biasing`）：单条 AuT 输出与 `get_audio_features` 逐位相同；打包 batch 在 fp32 下差 1.5e-6（精确），bf16 下差 1.5e-2（舍入）；给 generate 路径喂官方 AuT 输出时与 `transcribe` 逐字相同。
 - **AuT 必须是训练 CTC 时那份**：构造时用 `meta.json` 的 `aut_fingerprint` 核对 LLM 的 checkpoint，不一致直接报错（例如微调过 AuT 的模型）。
 - **切段与批处理**：长音频在低能量处切成 ≤ `max_segment_sec`（30 s）的段，每段单独检索、单独拼 context（检索耗时随查询长度增长）；按补齐后总时长（240 s）和条数（8，限制 LLM prefill 显存）组 batch。
-- **`ctc_rag_hw` 适配**：`CTCRagTokenizer` 预先算好整张 piece 表（它每次调用都对全词表 `decode([i])`，我们的表 7.5 ms）；词首 `▁` 换成空格（它的雷达自己去掉 `▁`，greedy 拼接不加分隔符），blank/unk/标签解码为空；`frame_shift_ms` = 1000/13。context 用空格连接热词（同官方示例），每段最多 `max_hotwords`（30）个。
-- **实测**（131 s 手术对话，热词库 2,280 条，5 段，峰值显存 5.1 GB）：AuT 约 30 ms、CTC 约 15 ms、检索约 450–480 ms（逐段 CPU）、LLM 约 2.0 s，RTF 0.016（不检索）/ 0.019（检索）。标准答案 14 个热词在转写里的出现次数：不加 context 36，检索 40，标准答案作 context 42；检索召回 12/14（共检索出 111 个）；每段只取 10 个时召回 8/14、出现次数 37。
+- **`ctc_rag_hw` 适配**：`CTCRagTokenizer` 预先算好整张 piece 表（它每次调用都对全词表 `decode([i])`，我们的表 7.5 ms）；词首 `▁` 换成空格（它的雷达自己去掉 `▁`，greedy 拼接不加分隔符），blank/unk/标签解码为空；`frame_shift_ms` = 1000/13。context 是 `Vocabulary: 热词1, 热词2, ….`（`hotword_context`，见下条），每段最多 `max_hotwords`（30）个，没检索到热词时为空。
+- **热词格式与抄写**：只写空格分隔的热词时，短段偶尔会把热词表原样当转写输出（手术录音 ≤ 8 s 的 614 个窗口里约 3%，多为从第一个热词起整表照抄；与热词数、prompt 和音频的长度比无关；静音不会抄；≥ 12 s 的 92 段 0 次）。改用 Hugging Face Qwen3-ASR 示例的写法 `Vocabulary: a, b, c.` 后降到 0.8%（K=30 时 18 → 5 次，逐窗口看没有新增），偏置收益不变（整条录音的标准热词出现次数仍为 40；700 条 dev 片段上，参考文本里的热词识别率 93.6% → 97.9%）。起作用的主要是 `Vocabulary:` 前缀：只加前缀、仍用空格分隔时同样是 5 次，只换逗号则没有帮助；逗号和句号让每段 prompt 多约 30% 的 token（K=30 时 147 对 114）。剩下的抄写集中在声学含糊的碎片上，还需要校验回退（例如与 CTC 粗转写比对），尚未实现。
+- **实测**（131 s 手术对话，热词库 2,280 条，5 段，峰值显存 5.1 GB）：AuT 约 30 ms、CTC 约 15 ms、检索约 450–480 ms（逐段 CPU）、LLM 约 2.0 s，RTF 0.016（不检索）/ 0.019（检索）。标准答案 14 个热词在转写里的出现次数：不加 context 36，检索 40，标准答案作 context 41；检索召回 12/14（共检索出 113 个）；每段只取 10 个时召回 8/14、出现次数 37。
 - **批量 GPU 检索**（`retriever_device="gpu"`，即 `CTCRagRetriever.retrieve_batch`）：热词雷达（`GpuHotwordRadar`，trie 状态上的稀疏 DP）和音素纠错（`GpuPhonemeCorrector`，批量 Myers 上界 + 精确 DP）整批各在 GPU 上跑一次，结果与逐段 CPU 检索逐项一致（`test_biasing` B5；`ctc_rag_hw/tests/test_gpu_*.py`）。每段 28 s、batch 12：热词库 2,284 条时检索 1.14 s → 0.07 s，总耗时 3.41 s → 2.37 s；10 万条时检索 70 s → 1.0 s（逐段 CPU 每段约 6 s），总耗时 3.26 s。
 
 ## 数据（ModelScope 上的 WebDataset 分片）

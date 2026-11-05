@@ -45,6 +45,15 @@ class CTCRagTokenizer:
         return "".join(self.pieces[int(i)] for i in ids)
 
 
+def hotword_context(hotwords) -> str:
+    """System prompt for a hotword list, as in the Hugging Face Qwen3-ASR example: "Vocabulary: w1, w2." ("" for none).
+
+    With a bare space-separated list, short segments sometimes come back as the list itself instead of a transcript;
+    this format makes that much rarer at the same hotword gains (README, "热词格式与抄写").
+    """
+    return "Vocabulary: " + ", ".join(hotwords) + "." if hotwords else ""
+
+
 @dataclass
 class BiasedTranscription:
     language: str
@@ -146,7 +155,7 @@ class CTCRagQwen3ASR:
         if context is None and hotwords:
             found = [r.retrieved_hotwords[: self.max_hotwords] for r in self.retriever.retrieve_batch(
                 log_probs, lp_lens.tolist(), self.max_hotwords, self.ctc_topk, hotwords=hotwords)]
-        contexts = [" ".join(h) if context is None else context for h in found]  # space-separated, as in the examples
+        contexts = [hotword_context(h) if context is None else context for h in found]
         t = self._lap("retrieval", t)
         raw = self._generate(embeds, contexts, language)
         self._lap("llm", t)
