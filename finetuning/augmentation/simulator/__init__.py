@@ -3,6 +3,7 @@
 
 from .core import (
     NoisePool,
+    RIRPool,
     apply_scenario,
     available_scenarios,
     load_audio,
@@ -13,6 +14,7 @@ from .severity import sample_severity
 
 __all__ = [
     "NoisePool",
+    "RIRPool",
     "SCENARIOS",
     "apply_scenario",
     "available_scenarios",

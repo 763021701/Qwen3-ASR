@@ -651,7 +651,7 @@ def _load_extra_eval_items(spec: str) -> Tuple[str, List[Tuple[str, str]]]:
         with open(path, "r", encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
                 audio = str(row.get("audio_path") or row.get("audio") or "").strip()
-                text = str(row.get("text") or "").strip()
+                text = _wer_extract_ref(str(row.get("text") or "").strip())
                 if audio and text:
                     rows.append((audio, text))
     else:
@@ -661,7 +661,7 @@ def _load_extra_eval_items(spec: str) -> Tuple[str, List[Tuple[str, str]]]:
                     continue
                 item = json.loads(line)
                 audio = str(item.get("audio_path") or item.get("audio") or "").strip()
-                text = str(item.get("text") or "").strip()
+                text = _wer_extract_ref(str(item.get("text") or "").strip())
                 if audio and text:
                     rows.append((audio, text))
     if not rows:
@@ -1172,6 +1172,14 @@ def build_training_data(args_cli) -> TrainingData:
         raise RuntimeError("Data pipeline config is missing.")
     augmentation = AudioAugmentConfig.from_spec(pipeline.config.augmentation)
     simulation = pipeline.config.augmentation.simulation
+    if simulation.enabled and simulation.clean_sources:
+        known = {source.name for source in pipeline.sources}
+        unknown = set(simulation.clean_sources) - known
+        if unknown:
+            raise ValueError(
+                "simulation.clean_sources references unknown sources: "
+                f"{sorted(unknown)}"
+            )
     service = None
     clean_pipeline = pipeline
     if simulation.enabled:

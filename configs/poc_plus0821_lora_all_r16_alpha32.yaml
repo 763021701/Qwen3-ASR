@@ -32,6 +32,8 @@ training:
   epochs: 3
   extra_eval_sets:
     radiology: raw/POC_test/radiology.csv
+    # Generate with tools/materialize_robust_eval.py (see the robust config header).
+    robust_dev: outputs/robust_eval/poc_0821_dev/eval.jsonl
   grad_acc: 16
   log_steps: 10
   lr: 2e-5

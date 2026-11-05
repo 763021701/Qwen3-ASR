@@ -23,3 +23,11 @@ data:
     simulation:
       enabled: false
       spool_dir: ../../outputs/aug_spool
+      noise_dir: ../../data/augmentation/noise
+      reverb_mode: mixed
+      rir_dir: ../../data/augmentation/rir
+      rir_cache_files: 128
+      # 1.0 = measured RIRs only; lower to mix in simulated_rirs.
+      rir_real_prob: 1.0
+      # Probability of real RIR vs synthetic RIR in reverb_mode=mixed.
+      rir_mix_prob: 0.8

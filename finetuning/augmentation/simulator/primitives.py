@@ -93,9 +93,14 @@ def _synth_rir(sr, room_size, damping, rng):
     return rir.astype(np.float32)
 
 
-def add_reverb(wav, sr, rng, room_size, damping, wet_level, dry_level):
+def add_reverb(wav, sr, rng, room_size, damping, wet_level, dry_level,
+               rir_pool=None, use_real_rir=False):
     """卷积混响（dense reflections），按 wet/dry 电平混合，输出裁回原长。"""
-    rir = _synth_rir(sr, room_size, damping, rng)
+    rir = None
+    if use_real_rir and rir_pool is not None:
+        rir = rir_pool.sample(rng, room_size=room_size)
+    if rir is None:
+        rir = _synth_rir(sr, room_size, damping, rng)
     wet_sig = sps.fftconvolve(wav, rir)[: len(wav)]
     wet_sig /= (np.max(np.abs(wet_sig)) + 1e-12)
     wet_sig *= np.max(np.abs(wav)) + 1e-12

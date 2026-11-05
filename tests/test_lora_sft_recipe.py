@@ -1,9 +1,11 @@
 """LoRA must honor the data and evaluation settings used by the SFT baseline."""
 
 import importlib
+import json
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -45,6 +47,23 @@ class LoraSftRecipeTest(unittest.TestCase):
         self.assertEqual(type(adapter), type(baseline))
         for key in ("betas", "eps", "fused"):
             self.assertEqual(adapter.defaults[key], baseline.defaults[key])
+
+    def test_extra_eval_strips_asr_prefix(self):
+        from finetuning.qwen3_asr_sft import _load_extra_eval_items
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "eval.jsonl"
+            rows = [
+                {"audio": "a.wav", "text": "language Chinese<asr_text>你好"},
+                {"audio": "b.wav", "text": "plain text"},
+            ]
+            path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            name, items = _load_extra_eval_items(f"robust={path}")
+        self.assertEqual(name, "robust")
+        self.assertEqual(items, [("a.wav", "你好"), ("b.wav", "plain text")])
 
     def test_preprocess_preserves_per_sample_noise_flag(self):
         from finetuning.qwen3_asr_sft import make_preprocess_fn_prefix_only

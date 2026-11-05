@@ -98,8 +98,14 @@ class SimulationSpec:
     severity_min: float = 0.0
     severity_max: float = 1.0
     clean_prob: float = 0.0
+    clean_sources: Tuple[str, ...] = ()
     noise_dir: Optional[str] = None
     noise_cache_files: int = 64
+    reverb_mode: str = "synthetic"
+    rir_dir: Optional[str] = None
+    rir_cache_files: int = 128
+    rir_real_prob: float = 1.0
+    rir_mix_prob: float = 0.8
     sample_rate: Optional[int] = None
     audio_format: str = "wav"
     max_spool_bytes: int = 10 * 1024**3
@@ -107,6 +113,7 @@ class SimulationSpec:
     clean_queue_size: int = 64
     ready_queue_size: int = 256
     stall_timeout_sec: float = 300.0
+    stats_log_interval_sec: float = 60.0
     spool_ttl_sec: float = 3600.0
     delete_spool_on_close: bool = True
     seed: int = 42
@@ -344,6 +351,35 @@ def _parse_simulation(raw: Any, base_dir: Optional[Path]) -> SimulationSpec:
     clean_prob = float(raw.get("clean_prob", 0.0))
     if not 0.0 <= clean_prob <= 1.0:
         raise ValueError("simulation.clean_prob must be in [0, 1].")
+    raw_clean_sources = raw.get("clean_sources") or []
+    if isinstance(raw_clean_sources, str):
+        raw_clean_sources = [
+            item.strip() for item in raw_clean_sources.split(",") if item.strip()
+        ]
+    if not isinstance(raw_clean_sources, list):
+        raise ValueError("simulation.clean_sources must be a list of source names.")
+    clean_sources = tuple(str(item).strip() for item in raw_clean_sources if str(item).strip())
+    if len(set(clean_sources)) != len(clean_sources):
+        raise ValueError("simulation.clean_sources must not contain duplicates.")
+    reverb_mode = str(raw.get("reverb_mode") or "synthetic").strip().lower()
+    if reverb_mode not in {"synthetic", "real", "mixed"}:
+        raise ValueError(
+            "simulation.reverb_mode must be 'synthetic', 'real', or 'mixed'."
+        )
+    rir_dir = _resolve_path(str(raw.get("rir_dir") or "") or None, base_dir)
+    if enabled and reverb_mode != "synthetic" and not rir_dir:
+        raise ValueError(
+            "simulation.rir_dir is required when reverb_mode is 'real' or 'mixed'."
+        )
+    rir_cache_files = int(raw.get("rir_cache_files", 128))
+    if rir_cache_files < 1:
+        raise ValueError("simulation.rir_cache_files must be >= 1.")
+    rir_real_prob = float(raw.get("rir_real_prob", 1.0))
+    if not 0.0 <= rir_real_prob <= 1.0:
+        raise ValueError("simulation.rir_real_prob must be in [0, 1].")
+    rir_mix_prob = float(raw.get("rir_mix_prob", 0.8))
+    if not 0.0 <= rir_mix_prob <= 1.0:
+        raise ValueError("simulation.rir_mix_prob must be in [0, 1].")
     max_spool_gb = raw.get("max_spool_gb")
     if max_spool_gb is not None:
         max_spool_bytes = int(float(max_spool_gb) * 1e9)
@@ -367,8 +403,14 @@ def _parse_simulation(raw: Any, base_dir: Optional[Path]) -> SimulationSpec:
         severity_min=severity_min,
         severity_max=severity_max,
         clean_prob=clean_prob,
+        clean_sources=clean_sources,
         noise_dir=_resolve_path(str(raw.get("noise_dir") or "") or None, base_dir),
         noise_cache_files=max(1, int(raw.get("noise_cache_files", 64))),
+        reverb_mode=reverb_mode,
+        rir_dir=rir_dir,
+        rir_cache_files=rir_cache_files,
+        rir_real_prob=rir_real_prob,
+        rir_mix_prob=rir_mix_prob,
         sample_rate=sample_rate,
         audio_format=str(raw.get("audio_format") or "wav").lower().lstrip("."),
         max_spool_bytes=max_spool_bytes,
@@ -376,6 +418,7 @@ def _parse_simulation(raw: Any, base_dir: Optional[Path]) -> SimulationSpec:
         clean_queue_size=max(1, int(raw.get("clean_queue_size", 64))),
         ready_queue_size=max(1, int(raw.get("ready_queue_size", 256))),
         stall_timeout_sec=float(raw.get("stall_timeout_sec", 300.0)),
+        stats_log_interval_sec=float(raw.get("stats_log_interval_sec", 60.0)),
         spool_ttl_sec=float(raw.get("spool_ttl_sec", 3600.0)),
         delete_spool_on_close=_as_bool(raw.get("delete_spool_on_close"), default=True),
         seed=int(raw.get("seed", 42)),
@@ -385,6 +428,8 @@ def _parse_simulation(raw: Any, base_dir: Optional[Path]) -> SimulationSpec:
     )
     if simulation.audio_format not in {"wav", "flac"}:
         raise ValueError("simulation.audio_format must be 'wav' or 'flac'.")
+    if simulation.stats_log_interval_sec < 0:
+        raise ValueError("simulation.stats_log_interval_sec must be >= 0.")
     if simulation.enabled:
         from finetuning.augmentation.simulator import SCENARIOS
 

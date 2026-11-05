@@ -183,6 +183,35 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(augmentation.simulation.scenarios, ("noise", "far_field"))
         self.assertEqual(augmentation.simulation.max_spool_bytes, 500_000_000)
 
+    def test_simulation_clean_sources(self):
+        config = parse_data_config({
+            "sources": [
+                {"name": "clean", "backend": "jsonl", "path": "/tmp/clean.jsonl"},
+                {"name": "robust", "backend": "jsonl", "path": "/tmp/robust.jsonl"},
+            ],
+            "augmentation": {
+                "simulation": {
+                    "enabled": True,
+                    "spool_dir": "/tmp/spool",
+                    "clean_sources": ["clean"],
+                }
+            },
+        })
+        self.assertEqual(config.augmentation.simulation.clean_sources, ("clean",))
+        with self.assertRaises(ValueError):
+            parse_data_config({
+                "sources": [
+                    {"name": "clean", "backend": "jsonl", "path": "/tmp/clean.jsonl"}
+                ],
+                "augmentation": {
+                    "simulation": {
+                        "enabled": True,
+                        "spool_dir": "/tmp/spool",
+                        "clean_sources": ["clean", "clean"],
+                    }
+                },
+            })
+
     def test_simulation_requires_spool_dir(self):
         with self.assertRaises(ValueError):
             parse_data_config({
@@ -523,6 +552,44 @@ class CollatorIntegrationTest(unittest.TestCase):
         trainer = object.__new__(CastFloatInputsTrainer)
         trainer.custom_train_sampler = sampler
         self.assertIs(trainer._get_train_sampler(), sampler)
+
+    def test_build_training_data_simulation_clean_sources(self):
+        from finetuning.qwen3_asr_sft import build_training_data
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            audio = root / "a.wav"
+            _write_wav(audio)
+            manifest = root / "train.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {"audio": str(audio), "text": "language Chinese<asr_text>你好"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config_path = root / "data.yaml"
+            config_path.write_text(
+                "data:\n"
+                "  sources:\n"
+                "    - name: clean\n"
+                "      backend: jsonl\n"
+                f"      path: {manifest}\n"
+                "      text_template: raw\n"
+                "  augmentation:\n"
+                "    simulation:\n"
+                "      enabled: true\n"
+                f"      spool_dir: {root / 'spool'}\n"
+                "      clean_sources: [clean]\n",
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(data_config=str(config_path), max_steps=1)
+            training_data = build_training_data(args)
+            try:
+                self.assertTrue(training_data.streaming)
+                self.assertIsNotNone(training_data.service)
+            finally:
+                training_data.close()
 
     def test_build_training_data_streaming_without_curriculum_arg(self):
         from finetuning.qwen3_asr_sft import build_training_data

@@ -58,6 +58,15 @@ def _identity(value):
     return value
 
 
+class _FailingIterable:
+    def __init__(self, samples):
+        self.samples = samples
+
+    def __iter__(self):
+        yield from self.samples
+        raise RuntimeError("reader boom")
+
+
 def _config(root: Path, num_simulators: int = 2) -> SimulationConfig:
     return SimulationConfig(
         spool_dir=str(root / "spool"),
@@ -90,6 +99,28 @@ class SimulatorServiceTest(unittest.TestCase):
             self.assertEqual(first_meta["simulated"], True)
             self.assertGreaterEqual(first_meta["severity"], 0.0)
             self.assertLessEqual(first_meta["severity"], 1.0)
+
+    def test_clean_source_bypasses_simulation(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = _config(Path(td))
+            config.clean_sources = ("clean_src",)
+            weights = resolve_scenario_weights(("noise",), None)
+            pool = NoisePool(None, sample_rate=SR)
+            clean = _clean_samples(1)[0]
+            clean["source"] = "clean_src"
+            audio, metadata = augment_clean_sample(clean, config, pool, weights)
+            np.testing.assert_allclose(audio, clean["audio"])
+            self.assertEqual(metadata["scenario"], "clean")
+            self.assertFalse(metadata["simulated"])
+            self.assertEqual(metadata["clean_reason"], "source")
+
+            degraded = _clean_samples(1)[0]
+            degraded["source"] = "robust_src"
+            _, degraded_metadata = augment_clean_sample(
+                degraded, config, pool, weights
+            )
+            self.assertTrue(degraded_metadata["simulated"])
+            self.assertIsNone(degraded_metadata["clean_reason"])
 
     def test_service_produces_and_releases_spool(self):
         with tempfile.TemporaryDirectory() as td:
@@ -130,6 +161,21 @@ class SimulatorServiceTest(unittest.TestCase):
             self.assertEqual(len(samples), 3)
             self.assertTrue(all(isinstance(sample["audio"], np.ndarray) for sample in samples))
             self.assertEqual(service.snapshot()["spool_bytes"], 0)
+
+    def test_reader_failure_raises_in_consumer(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            service = SimulationService(
+                _FailingIterable(_clean_samples(2)),
+                _config(root, num_simulators=1),
+            )
+            service.start()
+            try:
+                with self.assertRaises(RuntimeError):
+                    list(service.dataset)
+                self.assertGreaterEqual(service.snapshot()["errors"], 1)
+            finally:
+                service.close()
 
     def test_service_consumes_data_pipeline_iterable(self):
         with tempfile.TemporaryDirectory() as td:

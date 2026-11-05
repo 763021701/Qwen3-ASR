@@ -17,6 +17,7 @@ import numpy as np
 
 from .simulator import (
     NoisePool,
+    RIRPool,
     apply_scenario,
     load_audio,
     resolve_scenario_weights,
@@ -38,8 +39,14 @@ class SimulationConfig:
     severity_min: float = 0.0
     severity_max: float = 1.0
     clean_prob: float = 0.0
+    clean_sources: tuple = ()
     noise_dir: Optional[str] = None
     noise_cache_files: int = 64
+    reverb_mode: str = "synthetic"
+    rir_dir: Optional[str] = None
+    rir_cache_files: int = 128
+    rir_real_prob: float = 1.0
+    rir_mix_prob: float = 0.8
     sample_rate: int = 16000
     audio_format: str = "wav"
     max_spool_bytes: int = 10 * 1024**3
@@ -47,6 +54,7 @@ class SimulationConfig:
     clean_queue_size: int = 64
     ready_queue_size: int = 256
     stall_timeout_sec: float = 300.0
+    stats_log_interval_sec: float = 60.0
     spool_ttl_sec: float = 3600.0
     delete_spool_on_close: bool = True
     seed: int = 42
@@ -63,8 +71,22 @@ class SimulationConfig:
             raise ValueError("num_simulators must be >= 1.")
         if self.clean_queue_size < 1 or self.ready_queue_size < 1:
             raise ValueError("queue sizes must be >= 1.")
+        if self.stats_log_interval_sec < 0:
+            raise ValueError("stats_log_interval_sec must be >= 0.")
         if not 0.0 <= self.clean_prob <= 1.0:
             raise ValueError("clean_prob must be in [0, 1].")
+        if len(set(self.clean_sources)) != len(self.clean_sources):
+            raise ValueError("clean_sources must not contain duplicates.")
+        if self.reverb_mode not in {"synthetic", "real", "mixed"}:
+            raise ValueError("reverb_mode must be 'synthetic', 'real', or 'mixed'.")
+        if self.reverb_mode != "synthetic" and not self.rir_dir:
+            raise ValueError("rir_dir is required when reverb_mode is 'real' or 'mixed'.")
+        if self.rir_cache_files < 1:
+            raise ValueError("rir_cache_files must be >= 1.")
+        if not 0.0 <= self.rir_real_prob <= 1.0:
+            raise ValueError("rir_real_prob must be in [0, 1].")
+        if not 0.0 <= self.rir_mix_prob <= 1.0:
+            raise ValueError("rir_mix_prob must be in [0, 1].")
         if not 0.0 <= self.severity_min <= self.severity_max <= 1.0:
             raise ValueError("severity_min/max must satisfy 0 <= min <= max <= 1.")
         if self.audio_format.lower().lstrip(".") not in {"wav", "flac"}:
@@ -82,8 +104,14 @@ class SimulationConfig:
             severity_min=spec.severity_min,
             severity_max=spec.severity_max,
             clean_prob=spec.clean_prob,
+            clean_sources=spec.clean_sources,
             noise_dir=spec.noise_dir,
             noise_cache_files=spec.noise_cache_files,
+            reverb_mode=spec.reverb_mode,
+            rir_dir=spec.rir_dir,
+            rir_cache_files=spec.rir_cache_files,
+            rir_real_prob=spec.rir_real_prob,
+            rir_mix_prob=spec.rir_mix_prob,
             sample_rate=int(spec.sample_rate or sample_rate),
             audio_format=spec.audio_format,
             max_spool_bytes=spec.max_spool_bytes,
@@ -91,6 +119,7 @@ class SimulationConfig:
             clean_queue_size=spec.clean_queue_size,
             ready_queue_size=spec.ready_queue_size,
             stall_timeout_sec=spec.stall_timeout_sec,
+            stats_log_interval_sec=spec.stats_log_interval_sec,
             spool_ttl_sec=spec.spool_ttl_sec,
             delete_spool_on_close=spec.delete_spool_on_close,
             seed=spec.seed,
@@ -162,6 +191,8 @@ def augment_clean_sample(
     config: SimulationConfig,
     noise_pool: NoisePool,
     scenario_weights: Dict[str, float],
+    rir_pool: Optional[RIRPool] = None,
+    forced_scenario: Optional[str] = None,
 ) -> tuple[np.ndarray, Dict[str, Any]]:
     """Apply one deterministic mega-asr-sim scenario to a clean sample."""
     seed = _sample_seed(sample, config.seed)
@@ -172,14 +203,28 @@ def augment_clean_sample(
         for key, value in sample.items()
         if key != "audio" and isinstance(value, (str, int, float, bool, type(None)))
     }
-    if rng.random() < config.clean_prob:
+    clean_reason = None
+    use_clean = False
+    if forced_scenario is None:
+        if str(sample.get("source", "")) in config.clean_sources:
+            use_clean = True
+            clean_reason = "source"
+        elif rng.random() < config.clean_prob:
+            use_clean = True
+            clean_reason = "prob"
+    if use_clean:
         scenario = "clean"
         severity = 0.0
         simulated = False
     else:
-        names = list(scenario_weights)
-        probabilities = np.asarray([scenario_weights[name] for name in names], dtype=np.float64)
-        scenario = str(rng.choice(names, p=probabilities))
+        if forced_scenario is not None:
+            scenario = str(forced_scenario)
+        else:
+            names = list(scenario_weights)
+            probabilities = np.asarray(
+                [scenario_weights[name] for name in names], dtype=np.float64
+            )
+            scenario = str(rng.choice(names, p=probabilities))
         severity = config.severity_min + (
             config.severity_max - config.severity_min
         ) * sample_severity(rng, config.severity_mapping)
@@ -192,12 +237,16 @@ def augment_clean_sample(
             rng,
             noise_pool,
             skip_noise=not bool(int(sample.get("noise_aug", 1))),
+            rir_pool=rir_pool,
+            reverb_mode=config.reverb_mode,
+            rir_mix_prob=config.rir_mix_prob,
         )
     metadata.update(
         {
             "scenario": scenario,
             "severity": float(severity),
             "simulated": bool(simulated),
+            "clean_reason": clean_reason,
             "sim_version": config.sim_version,
             "sample_seed": int(seed),
         }
@@ -221,6 +270,23 @@ def simulator_worker(
             sample_rate=config.sample_rate,
             max_cached_files=config.noise_cache_files,
         )
+        rir_pool = None
+        if config.reverb_mode != "synthetic":
+            rir_pool = RIRPool(
+                config.rir_dir,
+                sample_rate=config.sample_rate,
+                max_cached_files=config.rir_cache_files,
+                real_prob=config.rir_real_prob,
+            )
+            if not rir_pool.available:
+                raise RuntimeError(f"No RIR files found under {config.rir_dir!r}.")
+            logger.info(
+                "Loaded %d RIRs (%d real, %d simulated) from %s",
+                len(rir_pool.files),
+                sum(info.source == "real" for info in rir_pool.files),
+                sum(info.source == "simulated" for info in rir_pool.files),
+                config.rir_dir,
+            )
         scenario_weights = resolve_scenario_weights(
             config.scenarios, config.scenario_weights
         )
@@ -233,7 +299,7 @@ def simulator_worker(
                 break
             try:
                 audio, metadata = augment_clean_sample(
-                    sample, config, noise_pool, scenario_weights
+                    sample, config, noise_pool, scenario_weights, rir_pool
                 )
                 item = spool.write(
                     audio, config.sample_rate, metadata, config.audio_format
@@ -267,6 +333,9 @@ def reader_worker(
     clean_iterable: Iterable[Dict[str, Any]],
     clean_queue,
     stop_event,
+    error_queue,
+    error_flag,
+    stats: _Stats,
     num_simulators: int,
 ) -> None:
     try:
@@ -280,6 +349,13 @@ def reader_worker(
                 except queue.Full:
                     continue
     except BaseException as exc:
+        stats.inc(stats.errors)
+        message = f"{type(exc).__name__}: {exc}"
+        error_flag.value = 1
+        try:
+            error_queue.put_nowait(message)
+        except queue.Full:
+            pass
         logger.exception("Clean-data reader failed: %s", exc)
         stop_event.set()
     finally:
@@ -312,6 +388,8 @@ class SimulationService:
         )
         self.clean_queue = self.ctx.Queue(maxsize=config.clean_queue_size)
         self.ready_queue = self.ctx.Queue(maxsize=config.ready_queue_size)
+        self.error_queue = self.ctx.Queue(maxsize=1)
+        self.error_flag = self.ctx.Value("i", 0)
         self.stats = _Stats(self.ctx)
         run_id = config.run_id or (
             time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
@@ -348,6 +426,17 @@ class SimulationService:
     def start(self) -> None:
         if self._started:
             return
+        if self.config.reverb_mode != "synthetic":
+            probe = RIRPool(
+                self.config.rir_dir,
+                sample_rate=self.config.sample_rate,
+                max_cached_files=1,
+                real_prob=self.config.rir_real_prob,
+            )
+            if not probe.available:
+                raise RuntimeError(
+                    f"No RIR files found under {self.config.rir_dir!r}."
+                )
         self.stats.started_at.value = time.time()
         try:
             for _ in range(self.config.num_simulators):
@@ -373,6 +462,9 @@ class SimulationService:
                     self.clean_iterable,
                     self.clean_queue,
                     self.stop_event,
+                    self.error_queue,
+                    self.error_flag,
+                    self.stats,
                     self.config.num_simulators,
                 ),
                 daemon=True,
@@ -401,8 +493,11 @@ class SimulationService:
             stats=self.stats,
             stop_event=self.stop_event,
             producer_done=self.producer_done,
+            error_queue=self.error_queue,
+            error_flag=self.error_flag,
             sample_rate=self.config.sample_rate,
             stall_timeout_sec=self.config.stall_timeout_sec,
+            stats_log_interval_sec=self.config.stats_log_interval_sec,
         )
 
     def snapshot(self) -> Dict[str, Any]:
@@ -435,7 +530,7 @@ class SimulationService:
                 process.join(timeout=2.0)
         if self.config.delete_spool_on_close:
             self.spool.close()
-        for q in (self.clean_queue, self.ready_queue):
+        for q in (self.clean_queue, self.ready_queue, self.error_queue):
             try:
                 q.close()
                 q.cancel_join_thread()
