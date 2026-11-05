@@ -2,7 +2,8 @@
 B1 the ctc_rag_hw piece table and the hotword context format; B2 the shared AuT pass returns the LLM's own audio
 embeddings (bit-exact for one utterance, bf16 noise when packed); B3 fed the LLM's own embeddings, the pipeline's
 generate path transcribes exactly like Qwen3ASRModel.transcribe; B4 the AuT runs once per batch and generate() never
-re-encodes the audio.
+re-encodes the audio; B5 batched GPU retrieval == per-segment CPU retrieval; B6 the CTC confidence gate leaves an
+unsure segment without hotwords.
   python -m aut_ctc.tests.test_biasing [--exp_dir exp/mix3000h_stream --ckpt last]"""
 from __future__ import annotations
 
@@ -123,6 +124,14 @@ def main():
     assert found["cpu"] == found["gpu"]
     print(f"B5 ok: batched GPU retrieval == per-segment CPU retrieval on {len(wavs)} segments "
           f"({sum(map(len, found['gpu']))} hotwords)", flush=True)
+
+    surgery = normalize_audios(f"{test_files}/surgery_dialogue_0133.wav")[0]
+    unsure, clear = surgery[60 * 16000 : 61 * 16000], surgery[: 8 * 16000]  # CTC "且扎" (confidence ~0.3) / clear
+    out = pipe.transcribe([(unsure, 16000), (clear, 16000)], hotwords=f"{test_files}/hotwords_lib.txt")
+    assert out[0].hotwords == [] and out[0].contexts == [""], out[0]
+    assert out[1].hotwords and out[1].contexts[0].startswith("Vocabulary: "), out[1]
+    print(f"B6 ok: min_ctc_confidence={pipe.retriever.min_ctc_confidence} gives the unsure 1 s window "
+          f"(CTC {out[0].ctc_text!r}) no hotwords, the clear one {len(out[1].hotwords)}", flush=True)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ def main():
     p.add_argument("--language", default=None)
     p.add_argument("--retriever_device", default="cpu", choices=["cpu", "gpu"])
     p.add_argument("--max_hotwords", type=int, default=30)
+    p.add_argument("--min_ctc_confidence", type=float, default=0.7, help="segments below it get no hotwords (0 = off)")
     p.add_argument("--max_segment_sec", type=float, default=30.0)
     p.add_argument("--max_batch_seconds", type=float, default=240.0)
     p.add_argument("--max_batch_size", type=int, default=8)
@@ -47,7 +48,8 @@ def main():
     cap_gpu_memory(device, args.gpu_memory_limit_gb)
     model_dir = args.model_dir or yaml.safe_load((Path(args.exp_dir) / "config.yaml").read_text())["aut"]["model_dir"]
     pipe = CTCRagQwen3ASR.from_pretrained(model_dir, args.exp_dir, args.ckpt, hotwords=args.hotwords,
-                                          retriever_device=args.retriever_device, device=str(device),
+                                          retriever_device=args.retriever_device,
+                                          min_ctc_confidence=args.min_ctc_confidence, device=str(device),
                                           max_hotwords=args.max_hotwords, max_segment_sec=args.max_segment_sec,
                                           max_batch_seconds=args.max_batch_seconds, max_batch_size=args.max_batch_size)
     wavs = normalize_audios(args.audio)

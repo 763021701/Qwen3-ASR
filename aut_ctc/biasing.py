@@ -89,15 +89,18 @@ class CTCRagQwen3ASR:
 
     @classmethod
     def from_pretrained(cls, model_dir, exp_dir, ckpt: str = "best", hotwords=None, retriever_device: str = "cpu",
-                        device: str = "cuda:0", **kwargs) -> "CTCRagQwen3ASR":
+                        device: str = "cuda:0", min_ctc_confidence: float = 0.7,
+                        **kwargs) -> "CTCRagQwen3ASR":
         """hotwords: default library (path, text or list). retriever_device: "cpu" (per segment) or "gpu" (radar and
-        phoneme corrector batched on the GPU, same results)."""
+        phoneme corrector batched on the GPU, same results). min_ctc_confidence: a segment whose mean top-1 CTC
+        probability over its non-blank frames is lower gets no hotwords (0 disables; README, "置信度门控")."""
         from ctc_rag_hw import CTCRagRetriever
 
         asr = Qwen3ASRModel.from_pretrained(model_dir, dtype=torch.bfloat16, device_map=device)
         ctc = AuTCTCHead(exp_dir, ckpt, device)
         retriever = CTCRagRetriever(blank_id=ctc.tokenizer.BLANK, ctc_tokenizer=CTCRagTokenizer(ctc.tokenizer),
-                                    frame_shift_ms=ctc.frame_shift_ms, device=retriever_device)
+                                    frame_shift_ms=ctc.frame_shift_ms, device=retriever_device,
+                                    min_ctc_confidence=min_ctc_confidence)
         if hotwords is not None:
             retriever.load_hotwords(hotwords)  # builds the phoneme index once; per-call lookups hit its cache
         return cls(asr, ctc, retriever, hotwords, **kwargs)
