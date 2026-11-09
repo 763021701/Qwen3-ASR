@@ -326,6 +326,8 @@ radiology 此前从未进入监督训练，只作为 `training.extra_eval_sets`�
 
 产物：`data/radiology_mix/RESULTS_mix.md`（完整明细）、`data/poc_train_radiology_mix_{m1,m2,m2b,m2c,m4,raw,realonly}/`、`configs/poc_radiology_mix_*.yaml`、`outputs/soup_mix_m1_m2b`（**37.12% 最优单模型**）、组件 checkpoint `outputs/poc_radiology_mix_{m1_1ep/checkpoint-600,m2_1ep/checkpoint-1295,m2b_1ep/checkpoint-780,m2c_1ep/checkpoint-1040}`。
 
+2026-11-04 清理：删除 `m2b_1ep/checkpoint-780`（约 12G），最终模型仍由 `outputs/soup_mix_m1_m2b` 保留。
+
 ### 2026-10-29 语言先验清洗（负结果）与 sim 文本泄漏
 
 动机：m1_yt（M1 + 全量 YouTube）把训练集 CJK 字符占比压到 **0.47%**（评测 5.98% / 5.28%），且 tts_radiology 的 ep1/RAD_slref/RADP_pathref 是**同一批 4,001 条文本的三个音色**（simA3x = 4,001 × 9，72.8h 只有 4,001 个唯一句子）。本轮按"语言先验 + 文本多样性"重建数据。
@@ -370,6 +372,108 @@ radiology 此前从未进入监督训练，只作为 `training.extra_eval_sets`�
 产物：`data/radiology_clean_lang/`（`clean_stats.json`、`clean_*.jsonl`、`youtube_strict.jsonl`）、`data/sim_radiology/cleanlang_*`（20,460 条，4.8G）、`data/poc_train_radiology_clean_lang/`（`sim/train.jsonl`、`train.jsonl`、`mix_stats.json`）、`configs/poc_radiology_clean_lang_1ep.yaml`、`outputs/poc_radiology_clean_lang_1ep/`（best `checkpoint-600`）、`outputs/contaminated_eval_clips.json`（泄漏片段清单）。对照 m1_yt 产物：`data/poc_train_radiology_mix_m1_yt/`、`configs/poc_radiology_mix_m1_yt_1ep.yaml`、`outputs/poc_radiology_mix_m1_yt_1ep/`（best `checkpoint-2100`）。
 
 2026-10-29 清理：仅保留 `clean-lang/checkpoint-600` 与 `m1_yt/checkpoint-2100`，删除其余 12 个 full-FT checkpoint（约 137G）；所有预测、summary 和评测日志保留。
+
+2026-11-04 清理：删除 `clean-lang/checkpoint-600` 与 `m1_yt/checkpoint-2100`（各约 12G）；结论已记录，评测产物保留。
+
+### 2026-10-30 辅助 CTC head：约束 AuT 保留帧级声学信息（负结果）
+
+动机：极端域偏移下基座 WER 很高，CE 微调时 LLM 容易用语言先验补全不确定的发音
+（模板化插入、循环）。在 AuT 输出上接 CTC 辅助 head，用实际转写做帧级监督，
+迫使 AuT 保留时序声学信息；最终推理仍由 LLM 输出。
+
+实现（[`ctc_auxiliary.py`](../finetuning/ctc_auxiliary.py)）：
+
+- 复用 SenseVoiceSmall 的 BPE tokenizer，但 CTC 输出词表只保留训练转写中出现的
+  piece（M1 上 2,712 token / 2,713 类，blank=0），映射存 `ctc_vocab.json`；
+- head 为 `LayerNorm(2048) -> Linear(2048,512) -> GELU -> LayerNorm -> Linear(512,V)`；
+- target 做声学归一化（小写、去标点、连字符转空格），不影响 LLM 的 CE 标签；
+- loss = CE + `ctc_loss_weight` * (CTC + `ctc_coverage_weight` * coverage)；
+- full fine-tuning 专用；诊断工具只跑 AuT + CTC head，不经过 LLM。
+
+首轮结果（M1 数据，λ=1.0，`lr_ctc=1e-3`；CTC-only 在 holdout19 上）：
+
+| 版本 | 词表 / head | 步数 | CTC-only WER | CER | 现象 |
+|---|---|---:|---:|---:|---|
+| v1 | 全 25,055 / 线性 | 300 | 99.71% | 97.83% | 92 帧中 91 帧 blank、1 帧 `the` |
+| v1 | 全 25,055 / 线性 | 600 | 88.61% | 88.02% | 仍是高频词拼接 |
+| v2 | 2,713 / 瓶颈 MLP | 150 | 92.66% | 91.51% | 仍以高频词为主 |
+| v3 | 2,713 / MLP + coverage 0.01 | 300 | **83.04%** | **70.98%** | 出现 `八七 八五五`、`lymph`、`measuring up to 零點五六 cm` 等内容 token |
+| v3 full 1ep | 2,713 / MLP + coverage 0.01 | 300 | **79.75%** | **57.79%** | 完整 1 epoch 配方（LR 衰减 1211 步）的 ckpt-300；内容 token 更完整 |
+
+LLM 端对照（同一 `eval_radiology_checkpoints.py` 口径）：
+
+| 模型 | radiology95 | holdout19 | POC53 | radiology95 gt100 |
+|---|---:|---:|---:|---:|
+| M1-600（baseline） | **38.15%** | 54.18% | **15.88%** | 2 |
+| CTC-v3 ckpt-300 | 53.24% | 81.27% | 18.94% | 4 |
+| CTC-v3 ckpt-600 | 48.88% | **54.68%** | 19.18% | 4 |
+| CTC-v3 ckpt-900 | 53.46% | 57.97% | 16.59% | 4 |
+| CTC-v3 ckpt-1200 | 60.24% | 56.96% | 18.47% | 4 |
+| CTC-v3 ckpt-1211 | 53.65% | 57.97% | 17.65% | 3 |
+| CTC-v3 ckpt-600（CTC-only） | — | 74.18% WER / **50.30% CER** | — | — |
+
+ckpt-600 时 fair set holdout19 与 M1 打平（54.68 vs 54.18），但 radiology95
+（含 76 条 train76）和 POC53 变差约 10.7pp / 3.3pp；CTC head 自身 CER 从
+ckpt-300 的 57.8% 降到 50.3%，仍在学习。ckpt-900/1200/1211 没有回到 baseline：
+holdout19 57.97/56.96/57.97（vs 54.18）、radiology95 53.46/60.24/53.65
+（vs 38.15）、POC53 16.59/18.47/17.65（vs 15.88）；ckpt-1200 的 radiology95 I/N 升到 27.4%
+（baseline 9.4%），出现 “Full medical history is available.”、
+“Please stop next slide.”、数字列表等循环——训练越久越差。
+
+ckpt-600 的 holdout19 插入分解（S/D/I，参考字符数 N）：
+
+| 解码器 | S | D | I | I/N |
+|---|---:|---:|---:|---:|
+| LLM（M1-600） | 290 | 121 | 312 | 15.8% |
+| LLM（CTC-v3-600） | 302 | 132 | 316 | 16.0% |
+| CTC-only（v3-600） | 313 | 605 | **77** | **3.9%** |
+
+声学 CTC 头几乎不插入（大量删除，WER 高），而 LLM 的插入率 ~16% 且未被 CTC
+训练改变。这说明 AuT 已经保留了声学证据（CTC 头能解码且保守），**瓶颈在 LLM
+的语言先验解码策略**，而不是 encoder 缺少声学信息；训练期 CTC 辅助损失单独
+无法降低 LLM 插入，下一步应做推理侧 CTC 约束/重排。
+
+radiology95 的插入增量 90% 来自单条 `g02_019.951-041.117.wav`：M1 输出
+“二號寫二零二三年, free subaponephric benignity, ...”，CTC-v3 输出
+“二號仔二零二三年一月十日拍的, **follow up period 二零二三年一月十日, follow up
+period 三 follow up period 二 ...**” 的模板化循环。即 CTC 辅助损失在该例上
+**引入**了更严重的模板插入，而不是消除它。
+
+结论：全词表 + 线性 head 会塌缩到“空白 + 单 token”，不能形成帧级对齐；换成
+训练集子词表 + 瓶颈 MLP 后改善有限；加 coverage penalty 后 CTC-only 脱离退化解
+（CER 71% 短程 / 58% full ckpt-300 / 50.3% ckpt-600）。但在本配方（λ=1、
+coverage 0.01 **未 detach**）下，训练期 CTC 辅助损失**没有**改善 fair
+holdout19，且随训练进行恶化（ckpt-1200 出现更多模板循环），POC53 retention
+也退化。CTC-only 头插入率仅 3.9%（LLM ~16%），说明 AuT 已经保留了声学证据，
+**瓶颈是 LLM 的语言先验解码策略**；训练期 CTC 单独无法解决，该配方不应继续放大。
+
+注意：本轮 coverage penalty 未 detach（旧实现），其梯度会回传到 encoder，
+可能诱导“多输出”偏差（上述 `follow up period` 循环）。新实现增加
+`--ctc_coverage_detach 1`（默认）：coverage 只训练 head，CTC loss 仍约束
+encoder。下一轮应优先做**推理侧 CTC 约束/重排**（CTC prefix score / n-best
+rerank / hallucination span trim）；若继续训练期方案，先用
+`tools/pretrain_ctc_head.py` 预训练 head，再以 `coverage=0`、小 λ（0.1–0.3）
+联合训练，并先跑 detached coverage 对照。
+
+产物（已归档）：[`ctc_auxiliary.py`](../archive/ctc_auxiliary/finetuning/ctc_auxiliary.py)、
+[`eval_ctc_encoder.py`](../archive/ctc_auxiliary/tools/eval_ctc_encoder.py)、
+[`pretrain_ctc_head.py`](../archive/ctc_auxiliary/tools/pretrain_ctc_head.py)、
+[`docs/ctc_auxiliary.md`](ctc_auxiliary.md)、
+`archive/configs/poc_radiology_mix_m1_ctc_v{1,2,3}_*.yaml`、
+`archive/outputs/poc_radiology_mix_m1_ctc_v3_cov_025ep/`（v3 短程，checkpoint-300）。
+诊断（对齐余量 / 学习能力 / 梯度量级与冲突）见
+[`ctc_diagnostic_report.md`](ctc_diagnostic_report.md)。关键结论：Frozen-AuT
+probe 显示 CTC-600 的 Val CER **35.8%** vs baseline **45.7%**（holdout19
+51.8% vs 57.2%），CTC 分支的可解码性反而更好；失败主因是 CTC 在共享 AuT
+上的梯度量级是 CE 的 2.7-5.5 倍（特征/参数空间），造成负迁移，以及 LLM 的
+插入是解码策略问题（CTC-only I/N 3-5% vs LLM ~16%）。**训练期 CTC 路线终止**，
+不再调 λ/词表/head 结构；推理侧 CTC verifier 仅作为可选的独立小实验。
+
+2026-11-04 清理：删除 `ctc_v3_cov_1ep/checkpoint-{600,1200}`（约 7.6G）；`outputs/ctc_diagnostic/` 与逐 ckpt summary 保留。
+
+2026-11-09 路线终止清理：实现/测试/诊断工具移至 `archive/ctc_auxiliary/`，配置移至
+`archive/configs/`，诊断数据与输出移至 `archive/data/`、`archive/outputs/`；两份
+CTC 文档保留为负结果记录。同日的 AuT-only（冻结 LLM）对照实验产物一并删除。
 
 ## 5. GRPO 数据挖掘
 

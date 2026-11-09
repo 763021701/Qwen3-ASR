@@ -41,3 +41,20 @@ one model per experiment and all optimizer states. Deletions: yue run 1300/1900/
 radiology oracle 5ep 76/152/228/304, radiology oracle 1ep weights, historical 2voice
 checkpoint, old Uyghur/OPD checkpoints, LoRA merged_best and non-selected adapters,
 and the LoRA preflight directory.
+
+## 2026-11-09
+
+Terminated the training-time auxiliary CTC head (negative result; see
+`docs/ctc_auxiliary.md` and `docs/ctc_diagnostic_report.md`).
+
+- `ctc_auxiliary/` — implementation, unit test and diagnostic tools
+  (`finetuning/ctc_auxiliary.py`, `tests/test_ctc_auxiliary.py`, `tools/`).
+- `configs/` — `poc_radiology_mix_m1_ctc_{1ep,v2_025ep,v3_cov_025ep,v3_cov_1ep}.yaml`.
+- `data/` — `ctc_diag_32.jsonl` (32-clip diagnostic set).
+- `outputs/` — `ctc_diagnostic/`, all `poc_radiology_mix_m1_ctc_*` runs, and the
+  CTC training nohup logs.
+- The tracked SFT/pipeline CTC hooks were reverted. The concurrent AuT-only
+  (frozen-LLM) control config, outputs and doc were deleted. Docs stay under
+  `docs/` as the negative-result record.
+- Archived code keeps its original imports and paths; it is not runnable in
+  place without restoring the `finetuning/` / `tools/` layout.
