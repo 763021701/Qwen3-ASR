@@ -1,0 +1,37 @@
+run_name: poc_robust_multilingual_lora_pilot_200h_local
+runtime:
+  dry_run: false
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+training:
+  data_config: configs/data_configs/robust_multilingual_pilot_200h_local.yaml
+  resume_from: outputs/poc_robust_multilingual_lora_pilot_200h_local/checkpoint-4600
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_robust_multilingual_lora_pilot_200h_local
+  batch_size: 8
+  grad_acc: 4
+  max_steps: 4750
+  epochs: 1
+  lr: 2e-5
+  lr_scheduler_type: linear
+  warmup_ratio: 0.03
+  log_steps: 10
+  save_steps: 100
+  save_total_limit: 3
+  save_best_total_limit: 0
+  sr: 16000
+  strip_target_brackets: 0
+  num_workers: 8
+  pin_memory: 1
+  persistent_workers: 0
+  prefetch_factor: 2
+  use_lora: 1
+  lora_scope: all
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_bias: none
+  lr_encoder: 2e-5
+  lr_aligner: 2e-5
+  lr_llm: 2e-5

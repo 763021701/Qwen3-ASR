@@ -1,0 +1,177 @@
+# 200-hour multilingual robust pilot.
+#
+# Target domain = the six public corpora below after mega-asr-sim corruption.
+# Weights are HOUR shares; the mixer uses mixture.weight_mode=hours so the
+# long-form Cantonese corpus does not dominate by sample count.
+data:
+  sources:
+    - name: gigaspeech
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/Gigaspeech-train-clean
+      path_in_repo: webdataset
+      split: train
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: English
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 12518
+      shard_exclude:
+        - webdataset/gigaspeech-train-00000-00007.tar
+        - webdataset/gigaspeech-train-00008-00015.tar
+      weight: 0.25
+
+    - name: wenetspeech
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/WenetSpeech
+      path_in_repo: TRAIN
+      split: train
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 9290
+      shard_exclude:
+        - TRAIN/wenetspeech-L-00000000-00000001.tar
+      weight: 0.30
+
+    # MAGICDATA ships three independently indexed subsets.
+    - name: magicdata_read
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/MAGICDATA-Mandarin
+      path_in_repo: MAGICDATA-Mandarin-Read
+      split: train
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 711.9
+      weight: 0.0415
+
+    - name: magicdata_conv
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/MAGICDATA-Mandarin
+      path_in_repo: MAGICDATA-Mandarin-Conversational
+      split: train
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 128.7
+      weight: 0.0075
+
+    - name: magicdata_heavy
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/MAGICDATA-Mandarin
+      path_in_repo: MAGICDATA-Mandarin-Heavy-Accent
+      split: train
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 18.4
+      weight: 0.001
+
+    - name: kespeech
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/KeSpeech
+      path_in_repo: /
+      split: train
+      shard_pattern: "kespeech-train_*.tar"
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 1397
+      weight: 0.10
+
+    - name: chuan
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/WenetSpeech-Chuan
+      path_in_repo: labeled
+      split: train
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 1998
+      shard_exclude:
+        - labeled/audios_028-000.tar
+        - labeled/audios_028-001.tar
+      weight: 0.10
+
+    - name: yue
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/WenetSpeech-Yue
+      path_in_repo: labeled
+      split: train
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Cantonese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 18580
+      shard_exclude:
+        - labeled/part_000-000.tar
+        - labeled/part_000-001.tar
+      weight: 0.20
+
+  mixture:
+    seed: 42
+    weight_mode: hours
+    sample_shuffle_buffer: 500
+    repeat_small_sources: true
+
+  cache:
+    dir: ../../outputs/ms_cache_pilot
+    max_gb: 60
+    min_free_gb: 30
+    prefetch_shards: 0
+    max_concurrent_downloads: 1
+    retries: 3
+    timeout_sec: 300
+    index_ttl_sec: 86400
+
+  augmentation:
+    speed:
+      enabled: true
+      prob: 0.5
+      factors: [0.9, 0.95, 1.0, 1.05, 1.1]
+    specaug:
+      enabled: true
+      prob: 0.5
+      time_mask_param: 50
+      freq_mask_param: 27
+      num_time_masks: 2
+      num_freq_masks: 2
+    simulation:
+      enabled: true
+      spool_dir: ../../outputs/aug_spool_pilot
+      scenarios:
+        - noise
+        - far_field
+        - obstructed
+        - echo_reverb
+        - recording
+        - distortion
+        - dropout
+        - far_field+noise
+        - echo_reverb+noise
+        - obstructed+noise
+      clean_prob: 0.15
+      clean_sources: []
+      severity_min: 0.2
+      severity_max: 0.85
+      noise_dir: ../../data/augmentation/noise
+      reverb_mode: mixed
+      rir_dir: ../../data/augmentation/rir
+      rir_cache_files: 128
+      rir_real_prob: 0.7
+      rir_mix_prob: 0.8
+      num_simulators: 4
+      audio_format: flac
+      max_spool_gb: 20
+      stall_timeout_sec: 3600
+      stats_log_interval_sec: 60
