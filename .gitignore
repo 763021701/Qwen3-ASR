@@ -31,3 +31,6 @@ raw/
 .opencode/goals/
 *.orig
 *.jsonl
+
+# External reference repos (nested git clones)
+references/

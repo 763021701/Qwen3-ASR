@@ -80,3 +80,16 @@ When executing a task:
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Communication Style
+
+- Respond in Chinese by default, retaining English technical terminology.
+- Lead with the conclusion and answer directly without repeating the user's question.
+- Keep standard responses within 5–10 lines and final reports for complex tasks within 20 lines whenever possible.
+- After modifying code, report only: what changed, verification results, and unresolved issues.
+- Do not narrate individual tool calls, file reads, or routine execution steps.
+- Avoid lengthy logs, full diffs, or unnecessary code unless explicitly requested.
+- Avoid pleasantries, repetitive summaries, irrelevant suggestions, and decorative headings.
+- Maintain thorough reasoning, implementation, testing, and code review; only minimize user-facing communication.
+- Clearly report errors, risks, test failures, and uncertainties. Never omit critical information for the sake of brevity.
+- When the user explicitly requests a detailed explanation, the above length limits do not apply.
