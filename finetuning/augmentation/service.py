@@ -40,6 +40,14 @@ class SimulationConfig:
     severity_max: float = 1.0
     clean_prob: float = 0.0
     clean_sources: tuple = ()
+    # Speed perturbation used to live in the DataLoader collator; run it in
+    # the simulator processes instead so the small DataLoader worker pool is
+    # not the CPU bottleneck.
+    speed_enabled: bool = False
+    speed_prob: float = 0.5
+    speed_factors: tuple = (0.9, 1.0, 1.1)
+    speed_factor_min: Optional[float] = None
+    speed_factor_max: Optional[float] = None
     noise_dir: Optional[str] = None
     noise_cache_files: int = 64
     reverb_mode: str = "synthetic"
@@ -77,6 +85,19 @@ class SimulationConfig:
             raise ValueError("clean_prob must be in [0, 1].")
         if len(set(self.clean_sources)) != len(self.clean_sources):
             raise ValueError("clean_sources must not contain duplicates.")
+        if not 0.0 <= self.speed_prob <= 1.0:
+            raise ValueError("speed_prob must be in [0, 1].")
+        if not self.speed_factors or any(float(f) <= 0 for f in self.speed_factors):
+            raise ValueError("speed_factors must be non-empty and positive.")
+        if (self.speed_factor_min is None) != (self.speed_factor_max is None):
+            raise ValueError(
+                "speed_factor_min and speed_factor_max must be set together."
+            )
+        if (
+            self.speed_factor_min is not None
+            and self.speed_factor_min > self.speed_factor_max
+        ):
+            raise ValueError("speed_factor_min must be <= speed_factor_max.")
         if self.reverb_mode not in {"synthetic", "real", "mixed"}:
             raise ValueError("reverb_mode must be 'synthetic', 'real', or 'mixed'.")
         if self.reverb_mode != "synthetic" and not self.rir_dir:
@@ -95,7 +116,20 @@ class SimulationConfig:
         resolve_scenario_weights(self.scenarios, self.scenario_weights)
 
     @classmethod
-    def from_spec(cls, spec: Any, sample_rate: int = 16000) -> "SimulationConfig":
+    def from_spec(
+        cls,
+        spec: Any,
+        sample_rate: int = 16000,
+        augmentation: Optional[Any] = None,
+    ) -> "SimulationConfig":
+        speed_enabled = bool(getattr(augmentation, "speed_enabled", False))
+        speed_prob = float(getattr(augmentation, "speed_prob", 0.5))
+        speed_factors = tuple(
+            float(value)
+            for value in getattr(augmentation, "speed_factors", (0.9, 1.0, 1.1))
+        )
+        speed_factor_min = getattr(augmentation, "speed_factor_min", None)
+        speed_factor_max = getattr(augmentation, "speed_factor_max", None)
         return cls(
             spool_dir=spec.spool_dir or "",
             scenarios=spec.scenarios,
@@ -105,6 +139,11 @@ class SimulationConfig:
             severity_max=spec.severity_max,
             clean_prob=spec.clean_prob,
             clean_sources=spec.clean_sources,
+            speed_enabled=speed_enabled,
+            speed_prob=speed_prob,
+            speed_factors=speed_factors,
+            speed_factor_min=speed_factor_min,
+            speed_factor_max=speed_factor_max,
             noise_dir=spec.noise_dir,
             noise_cache_files=spec.noise_cache_files,
             reverb_mode=spec.reverb_mode,
@@ -133,6 +172,7 @@ class _Stats:
     def __init__(self, ctx):
         self.produced = ctx.Value("q", 0)
         self.consumed = ctx.Value("q", 0)
+        self.consumed_hours = ctx.Value("d", 0.0)
         self.errors = ctx.Value("q", 0)
         self.started_at = ctx.Value("d", time.time())
 
@@ -147,6 +187,7 @@ class _Stats:
         return {
             "produced": produced,
             "consumed": consumed,
+            "consumed_hours": float(self.consumed_hours.value),
             "errors": int(self.errors.value),
             "produced_per_sec": produced / elapsed,
             "consumed_per_sec": consumed / elapsed,
@@ -184,6 +225,17 @@ def _clean_audio(sample: Dict[str, Any], sample_rate: int) -> np.ndarray:
     if isinstance(audio, str):
         return load_audio(audio, target_sr=sample_rate)
     raise TypeError(f"Unsupported audio field type: {type(audio).__name__}")
+
+
+def _apply_speed(wav: np.ndarray, sample_rate: int, factor: float) -> np.ndarray:
+    if factor == 1.0:
+        return wav
+    import librosa
+
+    new_sr = max(1, int(round(sample_rate / factor)))
+    return librosa.resample(
+        wav, orig_sr=sample_rate, target_sr=new_sr, res_type="soxr_hq"
+    ).astype(np.float32, copy=False)
 
 
 def augment_clean_sample(
@@ -241,12 +293,25 @@ def augment_clean_sample(
             reverb_mode=config.reverb_mode,
             rir_mix_prob=config.rir_mix_prob,
         )
+    speed_factor = 1.0
+    if config.speed_enabled and rng.random() <= config.speed_prob:
+        if (
+            config.speed_factor_min is not None
+            and config.speed_factor_max is not None
+        ):
+            speed_factor = float(
+                rng.uniform(config.speed_factor_min, config.speed_factor_max)
+            )
+        else:
+            speed_factor = float(rng.choice(config.speed_factors))
+        wav = _apply_speed(wav, config.sample_rate, speed_factor)
     metadata.update(
         {
             "scenario": scenario,
             "severity": float(severity),
             "simulated": bool(simulated),
             "clean_reason": clean_reason,
+            "speed_factor": float(speed_factor),
             "sim_version": config.sim_version,
             "sample_seed": int(seed),
         }

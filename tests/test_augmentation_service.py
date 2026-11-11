@@ -67,7 +67,7 @@ class _FailingIterable:
         raise RuntimeError("reader boom")
 
 
-def _config(root: Path, num_simulators: int = 2) -> SimulationConfig:
+def _config(root: Path, num_simulators: int = 2, **kwargs) -> SimulationConfig:
     return SimulationConfig(
         spool_dir=str(root / "spool"),
         scenarios=("noise",),
@@ -82,6 +82,7 @@ def _config(root: Path, num_simulators: int = 2) -> SimulationConfig:
         stall_timeout_sec=10.0,
         spool_ttl_sec=0.0,
         start_method="spawn",
+        **kwargs,
     )
 
 
@@ -99,6 +100,24 @@ class SimulatorServiceTest(unittest.TestCase):
             self.assertEqual(first_meta["simulated"], True)
             self.assertGreaterEqual(first_meta["severity"], 0.0)
             self.assertLessEqual(first_meta["severity"], 1.0)
+
+    def test_speed_perturbation_runs_in_simulator(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = _config(
+                Path(td),
+                speed_enabled=True,
+                speed_prob=1.0,
+                speed_factors=(1.1,),
+            )
+            weights = resolve_scenario_weights(("noise",), None)
+            pool = NoisePool(None, sample_rate=SR)
+            sample = _clean_samples(1)[0]
+            first, first_meta = augment_clean_sample(sample, config, pool, weights)
+            second, second_meta = augment_clean_sample(sample, config, pool, weights)
+            self.assertEqual(first_meta["speed_factor"], 1.1)
+            self.assertEqual(second_meta["speed_factor"], 1.1)
+            self.assertLess(len(first), len(sample["audio"]))
+            np.testing.assert_allclose(first, second)
 
     def test_clean_source_bypasses_simulation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -133,6 +152,7 @@ class SimulatorServiceTest(unittest.TestCase):
             self.assertEqual(len(samples), 5)
             self.assertEqual(snapshot["produced"], 5)
             self.assertEqual(snapshot["consumed"], 5)
+            self.assertAlmostEqual(snapshot["consumed_hours"], 5 * 0.1 / 3600, places=6)
             self.assertEqual(snapshot["errors"], 0)
             self.assertEqual(snapshot["spool_bytes"], 0)
             self.assertEqual(
