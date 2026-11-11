@@ -35,6 +35,70 @@ class LoraSftRecipeTest(unittest.TestCase):
         self.assertEqual(args.wer_max_new_tokens, 512)
         self.assertEqual(args.extra_eval_set, ["radiology=dev.csv"])
 
+    def test_trainers_disable_loss_kwargs_for_gradient_accumulation(self):
+        from transformers import TrainingArguments
+        from finetuning.qwen3_asr_sft import CastFloatInputsTrainer as SftTrainer
+
+        with tempfile.TemporaryDirectory() as output:
+            args = TrainingArguments(output_dir=output, use_cpu=True, report_to="none")
+            sft = SftTrainer(model=torch.nn.Linear(2, 2), args=args)
+            lora_trainer = lora.CastFloatInputsTrainer(
+                model=torch.nn.Linear(2, 2), args=args
+            )
+        self.assertFalse(sft.model_accepts_loss_kwargs)
+        self.assertFalse(lora_trainer.model_accepts_loss_kwargs)
+
+    def test_resume_keeps_cli_batch_size_and_save_steps(self):
+        from transformers import TrainingArguments
+        from finetuning.qwen3_asr_sft import CastFloatInputsTrainer as SftTrainer
+
+        class TinyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.thinker = torch.nn.Linear(1, 1)
+
+            def forward(self, x):
+                return {"loss": self.thinker(x).pow(2).mean()}
+
+        def train(trainer_cls, output, batch_size, max_steps, save_steps=1, resume=None):
+            batch_sizes = []
+
+            def collate(features):
+                batch_sizes.append(len(features))
+                return {"x": torch.ones(len(features), 1)}
+
+            args = TrainingArguments(
+                output_dir=output,
+                per_device_train_batch_size=batch_size,
+                max_steps=max_steps,
+                save_steps=save_steps,
+                eval_steps=save_steps,
+                use_cpu=True,
+                report_to="none",
+                remove_unused_columns=False,
+            )
+            trainer_cls(
+                model=TinyModel(), args=args, train_dataset=[{}] * 32, data_collator=collate
+            ).train(resume_from_checkpoint=resume)
+            return batch_sizes
+
+        for trainer_cls in (SftTrainer, lora.CastFloatInputsTrainer):
+            with self.subTest(trainer=trainer_cls.__module__):
+                with tempfile.TemporaryDirectory() as output:
+                    train(trainer_cls, output, batch_size=8, max_steps=1)
+                    resumed = train(
+                        trainer_cls, output, batch_size=2, max_steps=4, save_steps=2,
+                        resume=str(Path(output, "checkpoint-1")),
+                    )
+                    state = json.loads(
+                        Path(output, "checkpoint-2", "trainer_state.json").read_text()
+                    )
+                    saved = sorted(path.name for path in Path(output).glob("checkpoint-*"))
+                self.assertEqual(set(resumed), {2})
+                self.assertEqual(state["train_batch_size"], 2)
+                self.assertEqual(saved, ["checkpoint-1", "checkpoint-2", "checkpoint-4"])
+                self.assertEqual(state["eval_steps"], 2)
+
     def test_optimizer_honors_the_same_training_arguments_as_sft(self):
         from transformers import Trainer, TrainingArguments
 

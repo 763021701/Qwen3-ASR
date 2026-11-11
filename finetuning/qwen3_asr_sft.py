@@ -25,7 +25,7 @@ import re
 import shutil
 import string
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import librosa
@@ -417,6 +417,23 @@ class CastFloatInputsTrainer(Trainer):
         self.lr_aligner = lr_aligner
         self.lr_llm = lr_llm
         super().__init__(*args, **kwargs)
+        # The ASR forward accepts **kwargs but does not consume num_items_in_batch;
+        # without this Trainer skips the gradient-accumulation loss scaling.
+        self.model_accepts_loss_kwargs = False
+
+    def _inner_training_loop(self, batch_size=None, **kwargs):
+        # Trainer.train() replaces the configured batch size with the checkpoint's on resume.
+        configured = self.args.train_batch_size
+        if batch_size != configured and self.args.process_index == 0:
+            print(f"[resume] ignoring checkpoint batch_size={batch_size}; using {configured}")
+        return super()._inner_training_loop(batch_size=configured, **kwargs)
+
+    def compare_trainer_and_checkpoint_args(self, training_args, trainer_state):
+        # Runs right after the checkpoint state loads, so the configured batch size and step
+        # intervals apply to the resumed run and are recorded by later saves.
+        trainer_state.train_batch_size = training_args.train_batch_size
+        trainer_state.compute_steps(training_args, trainer_state.max_steps)
+        super().compare_trainer_and_checkpoint_args(training_args, trainer_state)
 
     def _get_train_sampler(self, train_dataset=None):
         if self.custom_train_sampler is not None:
@@ -1195,7 +1212,9 @@ def build_training_data(args_cli) -> TrainingData:
         from finetuning.augmentation.service import SimulationConfig, SimulationService
 
         sim_config = SimulationConfig.from_spec(
-            simulation, sample_rate=pipeline.config.sample_rate
+            simulation,
+            sample_rate=pipeline.config.sample_rate,
+            augmentation=augmentation,
         )
         service = SimulationService(clean_pipeline.dataset, sim_config)
         dataset = service.dataset
@@ -1209,6 +1228,11 @@ def build_training_data(args_cli) -> TrainingData:
             raise ValueError(
                 "--max_steps must be > 0 when --data_config uses WebDataset streaming."
             )
+    collator_augmentation = augmentation
+    if simulation.enabled and augmentation.speed_enabled:
+        # Speed is applied inside the simulator; keep the collator to
+        # SpecAugment only so DataLoader workers are not the CPU bottleneck.
+        collator_augmentation = replace(augmentation, speed_enabled=False)
     print(
         "[data] mode=%s streaming=%s simulation=%s sources=%d shards=%d "
         "estimated_samples=%s estimated_hours=%s"
@@ -1223,12 +1247,12 @@ def build_training_data(args_cli) -> TrainingData:
         )
     )
     print(
-        "[augment] speed=%s prob=%.2f specaug=%s prob=%.2f"
+        "[augment] collator speed=%s specaug=%s prob=%.2f; simulator speed=%s"
         % (
-            augmentation.speed_enabled,
-            augmentation.speed_prob,
-            augmentation.specaug_enabled,
-            augmentation.specaug_prob,
+            collator_augmentation.speed_enabled,
+            collator_augmentation.specaug_enabled,
+            collator_augmentation.specaug_prob,
+            bool(simulation.enabled and augmentation.speed_enabled),
         )
     )
     if streaming and getattr(args_cli, "curriculum", False):
@@ -1241,7 +1265,7 @@ def build_training_data(args_cli) -> TrainingData:
         dataset=dataset,
         sampler=sampler,
         streaming=streaming,
-        augmentation=augmentation,
+        augmentation=collator_augmentation,
         service=service,
     )
 
@@ -1325,6 +1349,7 @@ def main():
             and not streaming
         ),
         dataloader_prefetch_factor=args_cli.prefetch_factor if args_cli.num_workers > 0 else None,
+        ignore_data_skip=streaming,
         save_strategy=args_cli.save_strategy,
         save_steps=args_cli.save_steps,
         save_total_limit=None if keep_best_limit > 0 else args_cli.save_total_limit,

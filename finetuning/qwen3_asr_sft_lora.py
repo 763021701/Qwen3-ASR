@@ -179,6 +179,23 @@ class CastFloatInputsTrainer(Trainer):
         self.lr_aligner = lr_aligner
         self.lr_llm = lr_llm
         super().__init__(*args, **kwargs)
+        # The ASR forward accepts **kwargs but does not consume num_items_in_batch;
+        # without this Trainer skips the gradient-accumulation loss scaling.
+        self.model_accepts_loss_kwargs = False
+
+    def _inner_training_loop(self, batch_size=None, **kwargs):
+        # Trainer.train() replaces the configured batch size with the checkpoint's on resume.
+        configured = self.args.train_batch_size
+        if batch_size != configured and self.args.process_index == 0:
+            print(f"[resume] ignoring checkpoint batch_size={batch_size}; using {configured}")
+        return super()._inner_training_loop(batch_size=configured, **kwargs)
+
+    def compare_trainer_and_checkpoint_args(self, training_args, trainer_state):
+        # Runs right after the checkpoint state loads, so the configured batch size and step
+        # intervals apply to the resumed run and are recorded by later saves.
+        trainer_state.train_batch_size = training_args.train_batch_size
+        trainer_state.compute_steps(training_args, trainer_state.max_steps)
+        super().compare_trainer_and_checkpoint_args(training_args, trainer_state)
 
     def _get_train_sampler(self, train_dataset=None):
         if self.custom_train_sampler is not None:
@@ -513,6 +530,10 @@ def parse_args():
     return p.parse_args()
 
 def main():
+    # DataLoader workers must start fresh instead of forking a process that
+    # already owns a CUDA context (fork-after-CUDA caused silent worker deaths
+    # and resource-sharer failures).
+    torch.multiprocessing.set_start_method("spawn", force=True)
     args_cli = parse_args()
 
     training_data = build_training_data(args_cli)
@@ -582,6 +603,7 @@ def main():
             and not streaming
         ),
         dataloader_prefetch_factor=args_cli.prefetch_factor if args_cli.num_workers > 0 else None,
+        ignore_data_skip=streaming,
         save_strategy=args_cli.save_strategy,
         save_steps=args_cli.save_steps,
         save_total_limit=None if keep_best_limit > 0 else args_cli.save_total_limit,
