@@ -18,7 +18,13 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
-from .index import ShardInfo, SourceIndex, split_shard_metadata
+from .index import (
+    ShardInfo,
+    SourceIndex,
+    apply_estimated_hours,
+    matches_shard_exclude,
+    split_shard_metadata,
+)
 from .spec import CacheSpec, SourceSpec
 
 logger = logging.getLogger(__name__)
@@ -70,6 +76,9 @@ class ShardCache:
             raise ValueError("ModelScope source requires data.cache.dir.")
         self.source = source
         self.spec = spec
+        self.max_gb = float(
+            spec.per_source_max_gb.get(source.name, spec.max_gb)
+        )
         self.repo_id = source.repo_id
         self.namespace, self.repo_name = self.repo_id.split("/", 1)
         self.token = token or os.environ.get(spec.token_env) or None
@@ -295,6 +304,8 @@ class ShardCache:
         for entry in files:
             remote = entry["path"]
             name = Path(remote).name
+            if matches_shard_exclude(remote, self.source):
+                continue
             if metadata_by_name and name not in metadata_by_name:
                 continue
             if not (
@@ -319,6 +330,7 @@ class ShardCache:
                 f"No ModelScope shards matched {self.source.path_in_repo!r} / "
                 f"{self.source.shard_pattern!r} for split {split!r}."
             )
+        shards = apply_estimated_hours(shards, self.source.estimated_hours)
         total_bytes = sum(shard.size_bytes for shard in shards)
         sample_values = [shard.num_samples for shard in shards]
         total_samples = (
@@ -387,7 +399,7 @@ class ShardCache:
             handle.close()
 
     def _evict_for(self, required_bytes: int) -> None:
-        max_bytes = int(self.spec.max_gb * 1e9)
+        max_bytes = int(self.max_gb * 1e9)
         min_free = int(self.spec.min_free_gb * 1e9)
 
         def _mtime(path: Path) -> float:
@@ -414,7 +426,7 @@ class ShardCache:
 
     def _ensure_space(self, required_bytes: int) -> None:
         required = max(0, int(required_bytes))
-        max_bytes = int(self.spec.max_gb * 1e9)
+        max_bytes = int(self.max_gb * 1e9)
         min_free = int(self.spec.min_free_gb * 1e9)
         cache_bytes = self._cache_bytes()
         free = shutil.disk_usage(self.root).free

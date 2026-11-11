@@ -185,7 +185,12 @@ def build_data_pipeline(
             datasets.append(ManifestIterableDataset(manifest, seed=data_config.seed))
             jsonl_samples.append(len(manifest))
 
-    mixer = WeightedSourceMixer(datasets, weights, seed=data_config.seed)
+    mixer = WeightedSourceMixer(
+        datasets,
+        weights,
+        seed=data_config.seed,
+        weight_mode=data_config.mixture.weight_mode,
+    )
     estimated_hours = None
     if data_config.mixture.total_hours is not None:
         estimated_hours = sum(

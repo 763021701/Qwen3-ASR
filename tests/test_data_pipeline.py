@@ -27,7 +27,11 @@ from finetuning.data_pipeline.datasets import (
     iter_webdataset_shard,
     load_manifest_rows,
 )
-from finetuning.data_pipeline.index import index_source, split_shards_for_worker
+from finetuning.data_pipeline.index import (
+    ShardInfo,
+    index_source,
+    split_shards_for_worker,
+)
 from finetuning.data_pipeline.labels import make_target
 from finetuning.data_pipeline.mixer import select_source_shards
 from finetuning.data_pipeline.spec import Fields, MixtureSpec, SourceSpec
@@ -73,6 +77,22 @@ def _write_tar(path: Path, samples, audio_ext: str = "wav") -> None:
                 archive,
                 f"{sample['key']}.json",
                 json.dumps(meta, ensure_ascii=False).encode("utf-8"),
+            )
+
+
+def _write_json_text_tar(path: Path, samples) -> None:
+    with tarfile.open(path, "w") as archive:
+        for sample in samples:
+            buffer = io.BytesIO()
+            sf.write(buffer, sample["audio"], SR, format="WAV", subtype="PCM_16")
+            _add_tar_member(archive, f"{sample['key']}.wav", buffer.getvalue())
+            _add_tar_member(
+                archive,
+                f"{sample['key']}.json",
+                json.dumps(
+                    {"text": sample["text"], **sample.get("meta", {})},
+                    ensure_ascii=False,
+                ).encode("utf-8"),
             )
 
 
@@ -149,6 +169,32 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.cache.dir, "/tmp/qwen3_asr_cache")
         self.assertEqual(config.sources[0].provider, "modelscope")
 
+    def test_cache_per_source_max_gb(self):
+        base = {
+            "mode": "streaming",
+            "sources": [{
+                "name": "remote", "backend": "webdataset", "provider": "modelscope",
+                "repo_id": "owner/data", "path_in_repo": "shards",
+            }],
+        }
+        config = parse_data_config({
+            **base,
+            "cache": {
+                "dir": "/tmp/qwen3_asr_cache",
+                "max_gb": 8,
+                "per_source_max_gb": {"remote": 21},
+            },
+        })
+        self.assertEqual(config.cache.per_source_max_gb, {"remote": 21.0})
+        with self.assertRaises(ValueError):
+            parse_data_config({
+                **base,
+                "cache": {
+                    "dir": "/tmp/qwen3_asr_cache",
+                    "per_source_max_gb": {"remote": 0},
+                },
+            })
+
     def test_rejects_bad_template(self):
         with self.assertRaises(ValueError):
             parse_data_config({
@@ -182,6 +228,28 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(augmentation.simulation.spool_dir, "/tmp/aug_spool")
         self.assertEqual(augmentation.simulation.scenarios, ("noise", "far_field"))
         self.assertEqual(augmentation.simulation.max_spool_bytes, 500_000_000)
+
+    def test_multisource_compatibility_options(self):
+        config = parse_data_config({
+            "sources": [{
+                "name": "json_text",
+                "backend": "webdataset",
+                "provider": "modelscope",
+                "repo_id": "ns/repo",
+                "path_in_repo": "webdataset",
+                "fields": {"audio": "flac", "meta": "json"},
+                "text_key": "text",
+                "estimated_hours": 9290,
+                "shard_exclude": ["webdataset/holdout-*.tar"],
+            }],
+            "cache": {"dir": "/tmp/cache"},
+            "mixture": {"weight_mode": "hours"},
+        })
+        source = config.sources[0]
+        self.assertEqual(source.text_key, "text")
+        self.assertEqual(source.estimated_hours, 9290.0)
+        self.assertEqual(source.shard_exclude, ("webdataset/holdout-*.tar",))
+        self.assertEqual(config.mixture.weight_mode, "hours")
 
     def test_simulation_clean_sources(self):
         config = parse_data_config({
@@ -366,6 +434,79 @@ class WeightedMixerTest(unittest.TestCase):
         samples = list(itertools.islice(mixer, 4000))
         count_a = sum(sample["source"] == "a" for sample in samples)
         self.assertAlmostEqual(count_a / len(samples), 0.75, delta=0.04)
+
+    def test_hour_weighted_mix_ratio(self):
+        mixer = WeightedSourceMixer(
+            [
+                itertools.cycle([{"source": "long", "duration": 10.0}]),
+                itertools.cycle([{"source": "short", "duration": 1.0}]),
+            ],
+            weights=[0.5, 0.5],
+            seed=5,
+            weight_mode="hours",
+        )
+        samples = list(itertools.islice(mixer, 2200))
+        hours = {"long": 0.0, "short": 0.0}
+        for sample in samples:
+            hours[sample["source"]] += sample["duration"]
+        total = sum(hours.values())
+        self.assertAlmostEqual(hours["long"] / total, 0.5, delta=0.05)
+
+
+class SourceCompatibilityTest(unittest.TestCase):
+    def test_json_text_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            shard = root / "shard.tar"
+            _write_json_text_tar(
+                shard,
+                [{"key": "s0", "audio": _wav(), "text": "你好"}],
+            )
+            source = SourceSpec(
+                name="json_text",
+                backend="webdataset",
+                path=str(shard),
+                language="Chinese",
+                fields=Fields(audio="wav", meta="json"),
+                text_key="text",
+            )
+            sample = next(iter_webdataset_shard(shard, source))
+            self.assertEqual(sample["target"], "language Chinese<asr_text>你好")
+            self.assertAlmostEqual(sample["duration"], 0.2, places=2)
+
+    def test_estimated_hours_and_shard_exclude(self):
+        from finetuning.data_pipeline.index import apply_estimated_hours, index_source
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            shards = []
+            for index in range(2):
+                shard = root / f"shard-{index:05d}.tar"
+                _write_tar(
+                    shard,
+                    [{"key": f"s{index}", "audio": _wav(), "text": "x", "meta": {}}],
+                )
+                shards.append(shard)
+            source = SourceSpec(
+                name="wd",
+                backend="webdataset",
+                path=str(root),
+                fields=Fields(audio="wav", text="txt", meta="json"),
+                estimated_hours=10.0,
+                shard_exclude=("shard-00001.tar",),
+            )
+            indexed = index_source(source)
+            self.assertEqual(len(indexed.shards), 1)
+            self.assertAlmostEqual(indexed.total_hours, 10.0, places=5)
+        assigned = apply_estimated_hours(
+            [
+                ShardInfo(Path("a.tar"), 100, num_samples=10),
+                ShardInfo(Path("b.tar"), 300, num_samples=30),
+            ],
+            20.0,
+        )
+        self.assertAlmostEqual(assigned[0].hours, 5.0)
+        self.assertAlmostEqual(assigned[1].hours, 15.0)
 
 
 class WebDatasetPipelineTest(unittest.TestCase):

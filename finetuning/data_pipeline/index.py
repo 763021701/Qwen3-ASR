@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import fnmatch
 import glob
 import json
 import logging
 import os
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -65,6 +66,53 @@ def _load_split_info(source: SourceSpec) -> Optional[Mapping[str, Any]]:
     if isinstance(info.get("shards"), list):
         return info
     return None
+
+
+def matches_shard_exclude(path: Any, source: SourceSpec) -> bool:
+    if not source.shard_exclude:
+        return False
+    text = str(path)
+    name = Path(text).name
+    return any(
+        fnmatch.fnmatch(text, pattern) or fnmatch.fnmatch(name, pattern)
+        for pattern in source.shard_exclude
+    )
+
+
+def apply_estimated_hours(
+    shards: Iterable[ShardInfo], estimated_hours: Optional[float]
+) -> Tuple[ShardInfo, ...]:
+    """Assign missing shard hours proportionally when a source has no metadata."""
+    shards = tuple(shards)
+    if estimated_hours is None:
+        return shards
+    missing = [shard for shard in shards if shard.hours is None]
+    if not missing:
+        return shards
+    known = sum(float(shard.hours) for shard in shards if shard.hours is not None)
+    remaining = max(0.0, float(estimated_hours) - known)
+    weights = [
+        float(shard.num_samples)
+        if shard.num_samples is not None and shard.num_samples > 0
+        else float(shard.size_bytes)
+        for shard in missing
+    ]
+    total = sum(weights)
+    if total <= 0:
+        weights = [1.0] * len(missing)
+        total = float(len(missing))
+    result: List[ShardInfo] = []
+    for shard in shards:
+        if shard.hours is not None:
+            result.append(shard)
+            continue
+        weight = (
+            float(shard.num_samples)
+            if shard.num_samples is not None and shard.num_samples > 0
+            else float(shard.size_bytes)
+        )
+        result.append(replace(shard, hours=remaining * weight / total))
+    return tuple(result)
 
 
 def split_shard_metadata(split_info: Optional[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -170,10 +218,14 @@ def index_source(source: SourceSpec, scan_missing: bool = True) -> SourceIndex:
     """Discover local shards and attach sample/hour metadata when available."""
     if source.backend != "webdataset":
         raise ValueError(f"Source {source.name!r} is not a WebDataset source.")
-    candidates = _list_candidate_files(source)
+    candidates = [
+        path for path in _list_candidate_files(source)
+        if not matches_shard_exclude(path, source)
+    ]
     if not candidates:
         raise FileNotFoundError(
-            f"No shards matched {source.path!r} with pattern {source.shard_pattern!r}."
+            f"No shards matched {source.path!r} with pattern {source.shard_pattern!r} "
+            "after shard_exclude."
         )
 
     split_info = _load_split_info(source)
@@ -188,14 +240,17 @@ def index_source(source: SourceSpec, scan_missing: bool = True) -> SourceIndex:
             )
         candidates = selected
 
-    shards = tuple(
-        _build_shard_info(
-            path=path,
-            metadata=metadata_by_name.get(path.name, {}),
-            fields=source.fields,
-            scan_missing=scan_missing,
-        )
-        for path in candidates
+    shards = apply_estimated_hours(
+        (
+            _build_shard_info(
+                path=path,
+                metadata=metadata_by_name.get(path.name, {}),
+                fields=source.fields,
+                scan_missing=scan_missing,
+            )
+            for path in candidates
+        ),
+        source.estimated_hours,
     )
     total_bytes = sum(shard.size_bytes for shard in shards)
     sample_values = [shard.num_samples for shard in shards]

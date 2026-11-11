@@ -173,11 +173,8 @@ def _build_webdataset_sample(
     audio_ext = source.fields.audio.lower()
     text_ext = source.fields.text.lower()
     meta_ext = source.fields.meta.lower()
-    if audio_ext not in fields or text_ext not in fields:
-        raise ValueError(
-            f"Sample {key!r} in {shard} is missing audio ({audio_ext}) or text ({text_ext})."
-        )
-    text = fields[text_ext].decode("utf-8", errors="replace").strip()
+    if audio_ext not in fields:
+        raise ValueError(f"Sample {key!r} in {shard} is missing audio ({audio_ext}).")
     meta: Dict[str, Any] = {}
     if meta_ext in fields:
         try:
@@ -186,10 +183,30 @@ def _build_webdataset_sample(
             raise ValueError(f"Invalid JSON metadata for {key!r} in {shard}: {exc}") from exc
         if not isinstance(meta, dict):
             raise ValueError(f"Metadata for {key!r} in {shard} must be an object.")
+    if source.text_key is not None:
+        if meta_ext not in fields:
+            raise ValueError(
+                f"Sample {key!r} in {shard} sets text_key but has no {meta_ext} metadata."
+            )
+        value = meta.get(source.text_key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Sample {key!r} in {shard} has no text under "
+                f"metadata key {source.text_key!r}."
+            )
+        text = value.strip()
+    else:
+        if text_ext not in fields:
+            raise ValueError(
+                f"Sample {key!r} in {shard} is missing text ({text_ext})."
+            )
+        text = fields[text_ext].decode("utf-8", errors="replace").strip()
     language = meta.get("language") or source.language
     target = make_target(text, language, source.text_template)
     audio = decode_audio_bytes(fields[audio_ext], target_sr)
     duration = meta.get("duration", meta.get("duration_sec"))
+    if duration is None:
+        duration = len(audio) / max(1, int(target_sr))
     sample_key = str(meta.get("utt") or meta.get("key") or key)
     return {
         "audio": audio,
@@ -216,7 +233,9 @@ def iter_webdataset_shard(
     audio_ext = source.fields.audio.lower()
     text_ext = source.fields.text.lower()
     meta_ext = source.fields.meta.lower()
-    known_exts = {audio_ext, text_ext, meta_ext}
+    known_exts = {audio_ext, meta_ext}
+    if source.text_key is None:
+        known_exts.add(text_ext)
     current_key: Optional[str] = None
     current_fields: Dict[str, bytes] = {}
 
@@ -353,27 +372,34 @@ class LocalWebDataset(IterableDataset):
 
 
 class WeightedSourceMixer(IterableDataset):
-    """Sample-level weighted mix of infinite per-source iterables."""
+    """Weighted mix of infinite per-source iterables, by samples or hours."""
 
     def __init__(
         self,
         datasets: Sequence[IterableDataset],
         weights: Sequence[float],
         seed: int = 42,
+        weight_mode: str = "samples",
     ):
         if not datasets:
             raise ValueError("WeightedSourceMixer requires at least one dataset.")
         if len(datasets) != len(weights):
             raise ValueError("datasets and weights must have the same length.")
+        if weight_mode not in {"samples", "hours"}:
+            raise ValueError("weight_mode must be 'samples' or 'hours'.")
         self.datasets = list(datasets)
         self.weights = normalize_weights(weights)
         self.seed = int(seed)
+        self.weight_mode = weight_mode
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         info = get_worker_info()
         worker_id = info.id if info is not None else 0
         rng = random.Random(stable_seed(self.seed, "weighted_mixer", worker_id))
         iterators = [iter(dataset) for dataset in self.datasets]
+        if self.weight_mode == "hours":
+            yield from self._iter_hours(iterators, rng)
+            return
         while True:
             source_index = rng.choices(
                 range(len(iterators)), weights=self.weights, k=1
@@ -383,3 +409,33 @@ class WeightedSourceMixer(IterableDataset):
             except StopIteration:
                 iterators[source_index] = iter(self.datasets[source_index])
                 yield next(iterators[source_index])
+
+    def _iter_hours(self, iterators, rng) -> Iterator[Dict[str, Any]]:
+        yielded_hours = [0.0] * len(iterators)
+        total_hours = 0.0
+        active = [index for index, weight in enumerate(self.weights) if weight > 0]
+        if not active:
+            raise ValueError("All source weights are zero.")
+        while True:
+            deficits = [
+                self.weights[index] * total_hours - yielded_hours[index]
+                for index in active
+            ]
+            best = max(deficits)
+            candidates = [
+                index
+                for index, deficit in zip(active, deficits)
+                if deficit >= best - 1e-9
+            ]
+            source_index = rng.choice(candidates)
+            try:
+                sample = next(iterators[source_index])
+            except StopIteration:
+                iterators[source_index] = iter(self.datasets[source_index])
+                sample = next(iterators[source_index])
+            duration = float(sample.get("duration") or 0.0)
+            if duration <= 0:
+                duration = 1.0
+            yielded_hours[source_index] += duration
+            total_hours += duration
+            yield sample

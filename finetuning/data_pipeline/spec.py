@@ -35,6 +35,9 @@ class SourceSpec:
     audio_root: Optional[str] = None
     language: Optional[str] = None
     text_template: str = "language {language}<asr_text>{text}"
+    text_key: Optional[str] = None
+    shard_exclude: Tuple[str, ...] = ()
+    estimated_hours: Optional[float] = None
     weight: float = 1.0
     max_hours: Optional[float] = None
     max_repeat: float = 4.0
@@ -48,6 +51,10 @@ class CacheSpec:
 
     dir: Optional[str] = None
     max_gb: float = 100.0
+    # Optional per-source overrides. Sources sharing one repo root (e.g. the
+    # MAGICDATA subsets) each enforce the root budget, so the root needs
+    # current + prefetched shards for every subset resident.
+    per_source_max_gb: Dict[str, float] = field(default_factory=dict)
     min_free_gb: float = 20.0
     prefetch_shards: int = 1
     max_concurrent_downloads: int = 1
@@ -67,6 +74,7 @@ class MixtureSpec:
     samples_per_epoch: Optional[int] = None
     sample_shuffle_buffer: int = 2000
     repeat_small_sources: bool = True
+    weight_mode: str = "samples"
 
 
 @dataclass(frozen=True)
@@ -229,6 +237,20 @@ def _parse_source(raw: Dict[str, Any], base_dir: Optional[Path]) -> SourceSpec:
         if "{language}" in text_template and language is None:
             language = "None"
 
+    text_key = str(raw.get("text_key") or "").strip() or None
+    raw_exclude = raw.get("shard_exclude") or []
+    if isinstance(raw_exclude, str):
+        raw_exclude = [
+            item.strip() for item in raw_exclude.split(",") if item.strip()
+        ]
+    if not isinstance(raw_exclude, list):
+        raise ValueError(f"Source {name!r}: shard_exclude must be a list of glob patterns.")
+    shard_exclude = tuple(str(item).strip() for item in raw_exclude if str(item).strip())
+    estimated_hours = raw.get("estimated_hours")
+    if estimated_hours is not None:
+        estimated_hours = float(estimated_hours)
+        if estimated_hours <= 0:
+            raise ValueError(f"Source {name!r}: estimated_hours must be > 0.")
     weight = float(raw.get("weight", 1.0))
     if weight <= 0:
         raise ValueError(f"Source {name!r}: weight must be > 0.")
@@ -257,6 +279,9 @@ def _parse_source(raw: Dict[str, Any], base_dir: Optional[Path]) -> SourceSpec:
         audio_root=_resolve_path(str(raw.get("audio_root") or "") or None, base_dir),
         language=None if language is None else str(language),
         text_template=text_template,
+        text_key=text_key,
+        shard_exclude=shard_exclude,
+        estimated_hours=estimated_hours,
         weight=weight,
         max_hours=max_hours,
         max_repeat=max_repeat,
@@ -464,6 +489,14 @@ def _parse_cache(raw: Any, base_dir: Optional[Path]) -> CacheSpec:
     max_gb = float(raw.get("max_gb", 100.0))
     if max_gb <= 0:
         raise ValueError("data.cache.max_gb must be > 0.")
+    raw_caps = raw.get("per_source_max_gb") or {}
+    if not isinstance(raw_caps, dict):
+        raise ValueError("data.cache.per_source_max_gb must be a mapping.")
+    per_source_max_gb = {
+        str(name): float(value) for name, value in raw_caps.items()
+    }
+    if any(value <= 0 for value in per_source_max_gb.values()):
+        raise ValueError("data.cache.per_source_max_gb values must be > 0.")
     min_free_gb = float(raw.get("min_free_gb", 20.0))
     if min_free_gb < 0:
         raise ValueError("data.cache.min_free_gb must be >= 0.")
@@ -485,6 +518,7 @@ def _parse_cache(raw: Any, base_dir: Optional[Path]) -> CacheSpec:
     return CacheSpec(
         dir=_resolve_path(str(raw.get("dir") or "") or None, base_dir),
         max_gb=max_gb,
+        per_source_max_gb=per_source_max_gb,
         min_free_gb=min_free_gb,
         prefetch_shards=prefetch_shards,
         max_concurrent_downloads=max_concurrent,
@@ -532,6 +566,9 @@ def parse_data_config(raw: Dict[str, Any], base_dir: Optional[Path] = None) -> D
     shuffle_buffer = int(raw_mixture.get("sample_shuffle_buffer", 2000))
     if shuffle_buffer <= 0:
         raise ValueError("data.mixture.sample_shuffle_buffer must be > 0.")
+    weight_mode = str(raw_mixture.get("weight_mode") or "samples").strip().lower()
+    if weight_mode not in {"samples", "hours"}:
+        raise ValueError("data.mixture.weight_mode must be 'samples' or 'hours'.")
 
     mixture = MixtureSpec(
         total_hours=total_hours,
@@ -541,6 +578,7 @@ def parse_data_config(raw: Dict[str, Any], base_dir: Optional[Path] = None) -> D
         repeat_small_sources=_as_bool(
             raw_mixture.get("repeat_small_sources"), default=True
         ),
+        weight_mode=weight_mode,
     )
     return DataConfig(
         sources=sources,
