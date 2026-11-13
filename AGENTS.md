@@ -77,6 +77,26 @@ When executing a task:
 - Do not declare the goal complete while known relevant failures remain.
 - Only stop when the objective and success criteria are satisfied, or when a genuine external blocker makes further progress impossible.
 
+## 6. Project Evaluation Conventions
+
+- POC53 (English-dominant pathology): primary metric is corpus WER.
+- radiology95 and holdout19 (code-switch-heavy): primary metric is corpus MER; WER is secondary/report-only.
+- MER contract: apply the English medical normalizer first (`normalize_english`, which handles `c m`→`cm`, `乘`→`x`, alphanumeric boundaries), then `masr_eval_pkg.normalizers.get_normalizer("zh", zh_convert="none", number_normalize="to_arabic").normalize_for_mer`, then `compute_corpus_mer(..., text_preprocessed=True)`.
+- Do not score raw medical text with the default ChineseNormalizer: formatting artifacts (`26SS12099`, `c m`, `乘`) inflate MER. Historical baselines: `evaluation/baselines/poc_mer_history_hybrid.json`.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Communication Style
+
+- Respond in Chinese by default, retaining English technical terminology.
+- Lead with the conclusion and answer directly without repeating the user's question.
+- Keep standard responses within 5–10 lines and final reports for complex tasks within 20 lines whenever possible.
+- After modifying code, report only: what changed, verification results, and unresolved issues.
+- Do not narrate individual tool calls, file reads, or routine execution steps.
+- Avoid lengthy logs, full diffs, or unnecessary code unless explicitly requested.
+- Avoid pleasantries, repetitive summaries, irrelevant suggestions, and decorative headings.
+- Maintain thorough reasoning, implementation, testing, and code review; only minimize user-facing communication.
+- Clearly report errors, risks, test failures, and uncertainties. Never omit critical information for the sake of brevity.
+- When the user explicitly requests a detailed explanation, the above length limits do not apply.

@@ -1,0 +1,237 @@
+{
+  "champion3900": {
+    "poc53": {
+      "wer": 7.65,
+      "mer": 8.01,
+      "mer_tokens": 874,
+      "S": 37,
+      "D": 11,
+      "I": 22
+    },
+    "radiology95": {
+      "wer": 55.59,
+      "mer": 53.91,
+      "mer_tokens": 3200,
+      "S": 937,
+      "D": 538,
+      "I": 250
+    },
+    "holdout19": {
+      "wer": 64.3,
+      "mer": 62.42,
+      "mer_tokens": 495,
+      "S": 176,
+      "D": 66,
+      "I": 67
+    }
+  },
+  "old_stage1_1400": {
+    "poc53": {
+      "wer": 9.65,
+      "mer": 10.18,
+      "mer_tokens": 874,
+      "S": 55,
+      "D": 13,
+      "I": 21
+    },
+    "radiology95": {
+      "wer": 43.64,
+      "mer": 42.28,
+      "mer_tokens": 3200,
+      "S": 687,
+      "D": 351,
+      "I": 315
+    },
+    "holdout19": {
+      "wer": 53.16,
+      "mer": 49.29,
+      "mer_tokens": 495,
+      "S": 147,
+      "D": 29,
+      "I": 68
+    }
+  },
+  "old_directmix_2900": {
+    "poc53": {
+      "wer": 9.06,
+      "mer": 9.73,
+      "mer_tokens": 874,
+      "S": 43,
+      "D": 8,
+      "I": 34
+    },
+    "radiology95": {
+      "wer": 38.55,
+      "mer": 37.06,
+      "mer_tokens": 3200,
+      "S": 639,
+      "D": 228,
+      "I": 319
+    },
+    "holdout19": {
+      "wer": 66.84,
+      "mer": 60.81,
+      "mer_tokens": 495,
+      "S": 144,
+      "D": 31,
+      "I": 126
+    }
+  },
+  "old_stage2_1400": {
+    "poc53": {
+      "wer": 8.12,
+      "mer": 8.81,
+      "mer_tokens": 874,
+      "S": 39,
+      "D": 12,
+      "I": 26
+    },
+    "radiology95": {
+      "wer": 38.18,
+      "mer": 36.94,
+      "mer_tokens": 3200,
+      "S": 637,
+      "D": 285,
+      "I": 260
+    },
+    "holdout19": {
+      "wer": 57.22,
+      "mer": 55.35,
+      "mer_tokens": 495,
+      "S": 144,
+      "D": 52,
+      "I": 78
+    }
+  },
+  "v2_stage1_1300": {
+    "poc53": {
+      "wer": 9.88,
+      "mer": 10.18,
+      "mer_tokens": 874,
+      "S": 47,
+      "D": 17,
+      "I": 25
+    },
+    "radiology95": {
+      "wer": 59.73,
+      "mer": 55.84,
+      "mer_tokens": 3200,
+      "S": 723,
+      "D": 230,
+      "I": 834
+    },
+    "holdout19": {
+      "wer": 54.68,
+      "mer": 51.31,
+      "mer_tokens": 495,
+      "S": 138,
+      "D": 31,
+      "I": 85
+    }
+  },
+  "v2_stage2_1400": {
+    "poc53": {
+      "wer": 8.82,
+      "mer": 9.15,
+      "mer_tokens": 874,
+      "S": 47,
+      "D": 10,
+      "I": 23
+    },
+    "radiology95": {
+      "wer": 55.77,
+      "mer": 53.31,
+      "mer_tokens": 3200,
+      "S": 680,
+      "D": 357,
+      "I": 669
+    },
+    "holdout19": {
+      "wer": 57.22,
+      "mer": 53.94,
+      "mer_tokens": 495,
+      "S": 150,
+      "D": 26,
+      "I": 91
+    }
+  },
+  "small_raw20": {
+    "poc53": {
+      "wer": 19.18,
+      "mer": 20.25,
+      "mer_tokens": 874,
+      "S": 91,
+      "D": 23,
+      "I": 63
+    },
+    "radiology95": {
+      "wer": 55.62,
+      "mer": 52.75,
+      "mer_tokens": 3200,
+      "S": 1076,
+      "D": 236,
+      "I": 376
+    },
+    "holdout19": {
+      "wer": 69.37,
+      "mer": 65.45,
+      "mer_tokens": 495,
+      "S": 201,
+      "D": 52,
+      "I": 71
+    }
+  },
+  "small_denoise40": {
+    "poc53": {
+      "wer": 17.65,
+      "mer": 18.42,
+      "mer_tokens": 874,
+      "S": 95,
+      "D": 23,
+      "I": 43
+    },
+    "radiology95": {
+      "wer": 83.07,
+      "mer": 76.22,
+      "mer_tokens": 3200,
+      "S": 1132,
+      "D": 437,
+      "I": 870
+    },
+    "holdout19": {
+      "wer": 71.14,
+      "mer": 61.21,
+      "mer_tokens": 495,
+      "S": 194,
+      "D": 33,
+      "I": 76
+    }
+  },
+  "small_synth300": {
+    "poc53": {
+      "wer": 17.41,
+      "mer": 18.31,
+      "mer_tokens": 874,
+      "S": 85,
+      "D": 28,
+      "I": 47
+    },
+    "radiology95": {
+      "wer": 76.0,
+      "mer": 74.94,
+      "mer_tokens": 3200,
+      "S": 1108,
+      "D": 791,
+      "I": 499
+    },
+    "holdout19": {
+      "wer": 75.7,
+      "mer": 75.76,
+      "mer_tokens": 495,
+      "S": 196,
+      "D": 131,
+      "I": 48
+    }
+  },
+  "_normalization": "normalize_english (medical) -> MASR ChineseNormalizer.normalize_for_mer -> compute_corpus_mer(text_preprocessed=True)"
+}

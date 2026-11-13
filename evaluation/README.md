@@ -166,6 +166,17 @@ python evaluation/cantonese/baselines/eval_cantonese_asr_paraformer_jsonl.py \
   --output_predictions outputs/paraformer/cv_hk_eval/predictions.jsonl
 ```
 
+## POC evaluation metric convention
+
+For the pathology/radiology POC sets (radiology contains substantial Cantonese/English code-switching):
+
+- **POC53**: primary metric = corpus WER using `evaluation/english_medical` normalization.
+- **radiology95 / holdout19**: primary metric = corpus MER; also report WER.
+- **MER normalization**: `normalize_english` → `masr_eval_pkg` ChineseNormalizer `normalize_for_mer` → `compute_corpus_mer(..., text_preprocessed=True)`.
+- `tools/eval_unified7_scheme.py` emits both WER and MER per set automatically (`summary.json` plus each `*_summary.txt`).
+- Do not use the default ChineseNormalizer on raw medical text; `26SS12099`, `c m`, `乘` formatting inflates MER.
+- Historical baseline table: `evaluation/baselines/poc_mer_history_hybrid.json`.
+
 ## See also
 
 - `data/README.md` — manifest locations
