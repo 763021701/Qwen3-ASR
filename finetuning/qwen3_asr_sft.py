@@ -540,6 +540,41 @@ def copy_required_hf_files_for_qwen_asr(src_dir: str, dst_dir: str):
             shutil.copy2(src, os.path.join(dst_dir, fn))
 
 
+_REQUIRED_HF_FILES = (
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "special_tokens_map.json",
+    "chat_template.json",
+    "merges.txt",
+    "vocab.json",
+)
+
+
+def repair_missing_hf_files(ckpt_dir: str, output_dir: str) -> list[str]:
+    """Copy required HF files from a sibling checkpoint if this one lacks them."""
+    missing = [fn for fn in _REQUIRED_HF_FILES
+               if not os.path.isfile(os.path.join(ckpt_dir, fn))]
+    if not missing:
+        return []
+    donors = []
+    for name in os.listdir(output_dir):
+        suffix = name[len("checkpoint-"):] if name.startswith("checkpoint-") else ""
+        donor = os.path.join(output_dir, name)
+        if suffix.isdigit() and os.path.abspath(donor) != os.path.abspath(ckpt_dir):
+            donors.append((int(suffix), donor))
+    for _, donor in sorted(donors, reverse=True):
+        if all(os.path.isfile(os.path.join(donor, fn)) for fn in missing):
+            for fn in missing:
+                shutil.copy2(os.path.join(donor, fn), os.path.join(ckpt_dir, fn))
+            print(f"[inferable] repaired {ckpt_dir} from {donor}: {missing}")
+            return missing
+    print(f"[inferable] WARNING: {ckpt_dir} still missing {missing}; no donor found")
+    return missing
+
+
 class MakeEveryCheckpointInferableCallback(TrainerCallback):
     def __init__(self, base_model_path: str):
         self.base_model_path = base_model_path
@@ -553,6 +588,7 @@ class MakeEveryCheckpointInferableCallback(TrainerCallback):
             ckpt_dir = kwargs.get("checkpoint", ckpt_dir)
 
         copy_required_hf_files_for_qwen_asr(self.base_model_path, ckpt_dir)
+        repair_missing_hf_files(ckpt_dir, args.output_dir)
         return control
 
 
@@ -628,10 +664,44 @@ class KeepBestCheckpointsCallback(TrainerCallback):
             self.eval_losses[int(state.global_step)] = loss
         return control
 
+    def _latest_numeric_checkpoint(self, output_dir: str) -> Optional[str]:
+        candidates = []
+        for name in os.listdir(output_dir):
+            suffix = name[len("checkpoint-"):] if name.startswith("checkpoint-") else ""
+            if suffix.isdigit():
+                candidates.append((int(suffix), os.path.join(output_dir, name)))
+        return max(candidates)[1] if candidates else None
+
+    def _preserve_latest(self, output_dir: str) -> None:
+        """Hardlink the newest checkpoint to checkpoint-latest before pruning.
+
+        Best-metric pruning deletes non-top-k checkpoints, so a crash between
+        saves could otherwise lose hundreds of steps. Hardlinks keep the full
+        latest state at no extra disk cost and survive deletion of checkpoint-N.
+        """
+        latest = self._latest_numeric_checkpoint(output_dir)
+        if latest is None:
+            return
+        dest = os.path.join(output_dir, "checkpoint-latest")
+        if os.path.isdir(dest):
+            shutil.rmtree(dest)
+        os.makedirs(dest)
+        try:
+            for name in os.listdir(latest):
+                src = os.path.join(latest, name)
+                if os.path.isfile(src):
+                    os.link(src, os.path.join(dest, name))
+        except OSError as exc:
+            shutil.rmtree(dest, ignore_errors=True)
+            print(f"[latest-checkpoint] hardlink failed ({exc}); skipped")
+            return
+        print(f"[latest-checkpoint] {dest} -> {latest}")
+
     def on_save(self, args, state, control, **kwargs):
         if args.process_index != 0:
             return control
 
+        self._preserve_latest(args.output_dir)
         ranked = self._existing_ranked(args.output_dir)
         keep_steps = {step for _, step, _ in ranked[: self.limit]}
         for _, step, ckpt_dir in ranked[self.limit :]:
