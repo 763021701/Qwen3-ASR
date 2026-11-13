@@ -1,0 +1,79 @@
+run_name: poc_v2_stage1_synth80_1ep
+
+# Balanced-data two-stage curriculum, stage 1 (2026-11-12): synthetic-dominant
+# 1 epoch from base. Data is a subset of data/poc_train_unified_v2/dist_balanced:
+# synth 139.34 h + real 34.84 h (real_target_domain 6.03 h + Wenet/YouTube 28.81 h),
+# total 174.18 h / 70,934 rows (~2,216 updates at bs2 x ga16).
+# Stage-2 real is a strict superset of stage-1 real; stage-2 synth is a subset.
+# Hyper-parameters copy the plus0821 SFT-3900 champion recipe; CER selection on
+# the 53-clip POC dev, radiology sets report-only.
+
+dataset:
+  source_type: real_raw_denoised
+  language: "None"
+  validation_language: ""
+  raw_jsonl: raw/POC_train/real_target_domain/metadata_raw.jsonl
+  denoised_jsonl: raw/POC_train/real_target_domain/metadata_denoised.jsonl
+  test_source: raw/POC_test/pathology.jsonl
+  use_test_as_dev: 1
+  output_dir: data/poc_train_unified_v2/two_stage/stage1_synth_dominant
+  train_jsonl: data/poc_train_unified_v2/two_stage/stage1_synth_dominant/train.jsonl
+  dev_jsonl: data/poc_train_unified_v2/two_stage/stage1_synth_dominant/dev.jsonl
+  test_jsonl: data/poc_train_unified_v2/two_stage/stage1_synth_dominant/test.jsonl
+  dev_fraction: 0.2
+  split_seed: 42
+  check_audio: 1
+
+training:
+  model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5
+  output_dir: outputs/poc_v2_stage1_synth80_1ep
+  batch_size: 2
+  grad_acc: 16
+  lr: 2e-5
+  lr_scheduler_type: linear
+  warmup_ratio: 0.02
+  epochs: 1
+  save_steps: 100
+  save_total_limit: 3
+  save_best_total_limit: 3
+  save_best_metric: cer
+  wer_eval_samples: 0
+  wer_batch_size: 2
+  wer_max_new_tokens: 512
+  log_steps: 10
+  sr: 16000
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: 0
+  strip_target_brackets: 1
+  augment: 1
+  augment_prob: 1.0
+  speed_prob: 0.5
+  speed_factors: "0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2"
+  noise_prob: 0.5
+  noise_snr_min: 5.0
+  noise_snr_max: 20.0
+  noise_dir: raw/POC_train/noise/noise_target_domain
+  specaug_prob: 0.5
+  specaug_time_mask_param: 50
+  specaug_freq_mask_param: 27
+  specaug_num_time_masks: 2
+  specaug_num_freq_masks: 2
+  nospeech_augment: 1
+  nospeech_prob: 0.3
+  nospeech_pad_min_sec: 0.5
+  nospeech_pad_max_sec: 3.0
+
+evaluation:
+  eval_script: evaluation/english_medical/eval_english_medical_asr_jsonl.py
+  model: ""
+  language: ""
+  output_dir: outputs/poc_v2_stage1_synth80_1ep/eval
+  batch_size: 2
+  max_new_tokens: 512
+
+runtime:
+  launcher: python
+  nproc_per_node: 1
+  resume: false
+  dry_run: false

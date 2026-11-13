@@ -31,3 +31,7 @@ raw/
 .opencode/goals/
 *.orig
 *.jsonl
+
+# Generated per-run resume configs (contain local checkpoint paths)
+configs/*.autoresume.yaml
+configs/*_resume*.yaml
