@@ -47,9 +47,8 @@ Do not train silence as `language English<asr_text>` and expect base-model nospe
 
 ## Pitfalls in this repo
 
-1. **`tools/prepare_poc_train.py`** hardcodes `ASR_PREFIX = "language English<asr_text>"` for all sources, including silence. Silence rows become `language English<asr_text>` with an empty body — use `language None<asr_text>` instead.
-2. **Eval scripts** (e.g. `evaluation/chinese_english/eval_chinese_english_asr_jsonl.py`) default to `--language None` (string) = **forced None mode**, not auto-detect. For LID + nospeech eval matching training, pass an empty language or omit the flag if the script maps that to Python `None`.
-3. **`--curriculum`** (swap labels to `language None<asr_text>{text}`) is a fork extension, not upstream official SFT. It does not replace explicit language labels for teaching auto LID.
+1. **Eval scripts** (e.g. `evaluation/chinese_english/eval_chinese_english_asr_jsonl.py`) default to `--language None` (string) = **forced None mode**, not auto-detect. For LID + nospeech eval matching training, pass an empty language or omit the flag if the script maps that to Python `None`.
+2. **`--curriculum`** (swap labels to `language None<asr_text>{text}`) is a fork extension, not upstream official SFT. It does not replace explicit language labels for teaching auto LID.
 
 ## Quick checklist
 

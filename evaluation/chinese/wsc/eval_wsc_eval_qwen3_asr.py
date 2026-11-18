@@ -2,10 +2,9 @@
 """
 Evaluate Qwen3-ASR on WSC-Eval-ASR (Sichuan Mandarin / 四川话).
 
-Normalization is aligned with the Mandarin Chinese eval
-(evaluation/chinese_medical/eval_chinese_medical_asr.py): both reference and
-hypothesis are normalized at scoring time via masr_eval_pkg's ChineseNormalizer
-(NFKC + number ITN 二零零八→2008 + punctuation removal), not at jsonl-prep time.
+Both reference and hypothesis are normalized at scoring time via
+masr_eval_pkg's ChineseNormalizer (NFKC + number ITN 二零零八→2008 +
+punctuation removal), not at jsonl-prep time.
 
 Metrics:
   - CER (Character Error Rate): pure character-level, space-free
@@ -251,7 +250,6 @@ def main() -> None:
         print(f"Warning: {missing} predictions had no matching reference.", file=sys.stderr)
 
     # Normalize via ChineseNormalizer (NFKC + number ITN + punctuation removal)
-    # Aligned with evaluation/chinese_medical/eval_chinese_medical_asr.py
     normalizer = get_normalizer(
         "zh",
         zh_convert="none",           # no traditional/simplified conversion

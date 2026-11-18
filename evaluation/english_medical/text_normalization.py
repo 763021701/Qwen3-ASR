@@ -1,10 +1,9 @@
 # coding=utf-8
-"""Shared medical text normalization for Qwen3-ASR English medical experiments.
+"""English text normalization shared by training metrics and GigaSpeech eval.
 
 Lightweight module (no torch) used by:
-- data preparation / sampling (tools/prepare_real_raw_denoised_sft.py)
 - in-training CER/WER checkpoint selection (finetuning/qwen3_asr_sft.py)
-- final evaluation (evaluation/english_medical/eval_english_medical_asr_jsonl.py)
+- English eval (evaluation/english_medical/eval_english_medical_asr_jsonl.py)
 """
 
 from __future__ import annotations

@@ -43,7 +43,7 @@ Supported `dataset.source_type` values in v1:
 - `common_voice`: uses TSV files and `clips_dir`.
 - `kaldi`: uses `wav.scp` plus matching text files.
 - `funasr_jsonl`: uses FunASR-style message JSONL.
- `pathology_en_jsonl`: uses the high-quality pathology manifest and splits by `video_id`.
+- `switchlingua_csv`: uses a SwitchLingua CSV plus `switchlingua_audio_dir`.
 
 The prepared manifests are:
 

@@ -247,10 +247,6 @@ def _convert_command(
                 abspath(audio_dir),
             ]
         )
-    elif source_type == "balanced_multilingual":
-        raise ValueError(
-            "balanced_multilingual uses stage_prepare dedicated command, not _convert_command."
-        )
     else:
         raise ValueError(f"Unsupported dataset.source_type: {source_type!r}")
     max_s = dataset.get("max_samples")
@@ -274,153 +270,6 @@ def _split_convert_commands(dataset: Dict[str, Any], language: str, paths: Dict[
     return commands
 
 
-def _balanced_multilingual_prepare_command(dataset: Dict[str, Any], paths: Dict[str, str]) -> List[str]:
-    script = abspath("tools/prepare_balanced_multilingual.py")
-    output_dir = os.path.dirname(paths["train"])
-    cmd = [
-        sys.executable,
-        script,
-        "--output_dir",
-        output_dir,
-        "--train_jsonl",
-        paths["train"],
-        "--dev_jsonl",
-        paths["dev"],
-        "--seed",
-        str(int(dataset.get("split_seed", 42))),
-        "--train_ratio",
-        str(float(dataset.get("train_ratio", 0.95))),
-        "--dev_ratio",
-        str(float(dataset.get("dev_ratio", 0.05))),
-    ]
-    raw_dir = str(dataset.get("raw_dir") or "raw").strip()
-    if raw_dir:
-        cmd.extend(["--raw_dir", abspath(raw_dir)])
-    optional_paths = (
-        ("l2arctic_csv", "--l2arctic_csv"),
-        ("switchlingua_jsonl", "--switchlingua_jsonl"),
-        ("youtube_mix_jsonl", "--youtube_mix_jsonl"),
-        ("youtube_en_jsonl", "--youtube_en_jsonl"),
-        ("prepare_report_json", "--report_json"),
-        ("medical_tts_csv", "--medical_tts_csv"),
-        ("medical_tts_jsonl", "--medical_tts_jsonl"),
-    )
-    for key, flag in optional_paths:
-        val = str(dataset.get(key) or "").strip()
-        if val:
-            cmd.extend([flag, abspath(val)])
-    return cmd
-
-def _pathology_en_prepare_command(dataset: Dict[str, Any], paths: Dict[str, str]) -> List[str]:
-    source = str(dataset.get("source") or "").strip()
-    if not source:
-        raise ValueError("pathology_en_jsonl requires dataset.source.")
-    script = abspath("tools/prepare_pathology_en.py")
-    output_dir = os.path.dirname(paths["train"])
-    return [
-        sys.executable,
-        script,
-        "--input_jsonl",
-        abspath(source),
-        "--output_dir",
-        output_dir,
-        "--train_jsonl",
-        paths["train"],
-        "--dev_jsonl",
-        paths["dev"],
-        "--train_ratio",
-        str(float(dataset.get("train_ratio", 0.95))),
-        "--dev_ratio",
-        str(float(dataset.get("dev_ratio", 0.05))),
-        "--seed",
-        str(int(dataset.get("split_seed", 42))),
-        "--check_audio",
-        str(int(dataset.get("check_audio", 1))),
-    ]
-
-def _real_raw_denoised_prepare_command(
-    dataset: Dict[str, Any], paths: Dict[str, str]
-) -> List[str]:
-    raw_jsonl = str(dataset.get("raw_jsonl") or "").strip()
-    denoised_jsonl = str(dataset.get("denoised_jsonl") or "").strip()
-    test_source = str(dataset.get("test_source") or "").strip()
-    if not raw_jsonl or not denoised_jsonl or not test_source:
-        raise ValueError(
-            "real_raw_denoised requires dataset.raw_jsonl, "
-            "dataset.denoised_jsonl, and dataset.test_source."
-        )
-    script = abspath("tools/prepare_real_raw_denoised_sft.py")
-    output_dir = str(dataset.get("output_dir") or os.path.dirname(paths["train"]))
-    cmd = [
-        sys.executable,
-        script,
-        "--raw_jsonl",
-        abspath(raw_jsonl),
-        "--denoised_jsonl",
-        abspath(denoised_jsonl),
-        "--test_source",
-        abspath(test_source),
-        "--output_dir",
-        abspath(output_dir),
-        "--train_jsonl",
-        paths["train"],
-        "--dev_jsonl",
-        paths["dev"],
-        "--test_jsonl",
-        paths["test"],
-        "--dev_fraction",
-        str(float(dataset.get("dev_fraction", 0.2))),
-        "--seed",
-        str(int(dataset.get("split_seed", 42))),
-        "--check_audio",
-        str(int(dataset.get("check_audio", 1))),
-    ]
-    if int(dataset.get("use_test_as_dev", 0)) == 1:
-        cmd.extend(["--use_test_as_dev", "1"])
-
-    synthetic_values = {
-        "synthetic_jsonl": str(dataset.get("synthetic_jsonl") or "").strip(),
-        "synthetic_metadata_csv": str(
-            dataset.get("synthetic_metadata_csv") or ""
-        ).strip(),
-        "synthetic_audio_root": str(dataset.get("synthetic_audio_root") or "").strip(),
-    }
-    if any(synthetic_values.values()):
-        if not all(synthetic_values.values()):
-            raise ValueError(
-                "Synthetic data requires dataset.synthetic_jsonl, "
-                "dataset.synthetic_metadata_csv, and dataset.synthetic_audio_root."
-            )
-        for key, value in synthetic_values.items():
-            cmd.extend([f"--{key}", abspath(value)])
-        excluded_priorities = dataset.get("synthetic_exclude_priorities")
-        if excluded_priorities is None:
-            excluded_priorities = "test_only"
-        cmd.extend(
-            [
-                "--synthetic_exclude_priorities",
-                str(excluded_priorities),
-            ]
-        )
-
-    additional = dataset.get("additional_synthetic_csvs") or {}
-    if not isinstance(additional, dict):
-        raise ValueError("dataset.additional_synthetic_csvs must be a mapping of name to CSV path.")
-    for source_name, csv_path in additional.items():
-        if not str(csv_path or "").strip():
-            raise ValueError(f"dataset.additional_synthetic_csvs[{source_name!r}] is empty.")
-        cmd.extend(
-            [
-                "--additional_synthetic_csv",
-                f"{source_name}={abspath(str(csv_path))}",
-            ]
-        )
-    if additional:
-        max_per_text = int(dataset.get("additional_synthetic_max_per_text", 2) or 2)
-        cmd.extend(["--additional_synthetic_max_per_text", str(max_per_text)])
-    return cmd
-
-
 def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
     dataset = config.get("dataset", {})
     language = str(dataset.get("language") or "").strip()
@@ -430,17 +279,6 @@ def stage_prepare(config: Dict[str, Any], dry_run: bool) -> Dict[str, str]:
     output_dir = os.path.dirname(paths["train"])
     if output_dir and not dry_run:
         os.makedirs(output_dir, exist_ok=True)
-
-    source_type = str(dataset.get("source_type", "")).strip()
-    if source_type == "balanced_multilingual":
-        run_command(_balanced_multilingual_prepare_command(dataset, paths), dry_run=dry_run)
-        return paths
-    if source_type == "pathology_en_jsonl":
-        run_command(_pathology_en_prepare_command(dataset, paths), dry_run=dry_run)
-        return paths
-    if source_type == "real_raw_denoised":
-        run_command(_real_raw_denoised_prepare_command(dataset, paths), dry_run=dry_run)
-        return paths
 
     commands = _split_convert_commands(dataset, language, paths)
     if commands:
