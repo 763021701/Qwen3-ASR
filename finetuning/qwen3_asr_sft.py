@@ -44,13 +44,13 @@ if _REPO_ROOT not in sys.path:
 if __package__:
     from .module_freeze import (PARTS, count_part_parameters, parse_parts,
                                 set_part_freeze)
-    from .noise_augmentation import NoiseLibrary, maybe_add_noise
+    from .noise_augmentation import NoiseLibrary, maybe_add_noise, parse_noise_snr_tiers
     from .nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
     from .processor_collate import build_processor_batch_inputs
 else:
     from module_freeze import (PARTS, count_part_parameters, parse_parts,
                                set_part_freeze)
-    from noise_augmentation import NoiseLibrary, maybe_add_noise
+    from noise_augmentation import NoiseLibrary, maybe_add_noise, parse_noise_snr_tiers
     from nospeech_augmentation import NoSpeechAugmentConfig, apply_nospeech_augment
     from processor_collate import build_processor_batch_inputs
 
@@ -204,6 +204,12 @@ def _parse_float_list(value: str, default: Tuple[float, ...]) -> Tuple[float, ..
     return tuple(float(x.strip()) for x in raw.split(",") if x.strip())
 
 
+def _optional_float_arg(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value)
+
+
 @dataclass
 class AudioAugmentConfig:
     """Optional online augmentation for training only."""
@@ -217,6 +223,8 @@ class AudioAugmentConfig:
     noise_prob: float = 0.5
     noise_snr_min: float = 5.0
     noise_snr_max: float = 20.0
+    noise_snr_tiers: Tuple[Any, ...] = ()
+    noise_post_lufs: Optional[float] = None
     noise_dir: str = ""
     noise_dirs: Tuple[str, ...] = ()
     specaug_prob: float = 0.5
@@ -272,6 +280,10 @@ class AudioAugmentConfig:
             noise_prob=float(getattr(args, "noise_prob", 0.5)),
             noise_snr_min=float(getattr(args, "noise_snr_min", 5.0)),
             noise_snr_max=float(getattr(args, "noise_snr_max", 20.0)),
+            noise_snr_tiers=parse_noise_snr_tiers(
+                str(getattr(args, "noise_snr_tiers", "") or "")
+            ),
+            noise_post_lufs=_optional_float_arg(getattr(args, "noise_post_lufs", None)),
             noise_dir=str(getattr(args, "noise_dir", "") or ""),
             noise_dirs=noise_dirs,
             specaug_prob=float(getattr(args, "specaug_prob", 0.5)),
@@ -337,6 +349,8 @@ def augment_waveform(
             snr_min=cfg.noise_snr_min,
             snr_max=cfg.noise_snr_max,
             library=cfg.noise_library,
+            snr_tiers=cfg.noise_snr_tiers,
+            post_lufs=cfg.noise_post_lufs,
         )
     return out
 
@@ -1250,6 +1264,21 @@ def parse_args():
     p.add_argument("--noise_snr_min", type=float, default=5.0)
     p.add_argument("--noise_snr_max", type=float, default=20.0)
     p.add_argument(
+        "--noise_snr_tiers",
+        type=str,
+        default="",
+        help="Weighted SNR tiers as min:max[:weight] comma-separated (e.g. "
+        "'15:20:0.5,8:15:0.35,5:8:0.15'). When set, overrides uniform "
+        "noise_snr_min/max sampling.",
+    )
+    p.add_argument(
+        "--noise_post_lufs",
+        type=float,
+        default=None,
+        help="If set (e.g. -23), normalize loudness after mixing noise (BS.1770 "
+        "when pyloudnorm is installed).",
+    )
+    p.add_argument(
         "--noise_dir",
         type=str,
         default="",
@@ -1453,6 +1482,15 @@ def main():
                 "[augment] noise_dirs=%s files=%d"
                 % (",".join(roots), augment_cfg.noise_library.num_files)
             )
+        if augment_cfg.noise_snr_tiers:
+            print("[augment] noise_snr_tiers=%r" % (augment_cfg.noise_snr_tiers,))
+        else:
+            print(
+                "[augment] noise_snr_range=%.1f-%.1f dB"
+                % (augment_cfg.noise_snr_min, augment_cfg.noise_snr_max)
+            )
+        if augment_cfg.noise_post_lufs is not None:
+            print("[augment] noise_post_lufs=%.1f" % augment_cfg.noise_post_lufs)
         if augment_cfg.nospeech.enabled:
             ns = augment_cfg.nospeech
             print(

@@ -478,6 +478,21 @@ def parse_args():
     p.add_argument("--noise_snr_min", type=float, default=5.0)
     p.add_argument("--noise_snr_max", type=float, default=20.0)
     p.add_argument(
+        "--noise_snr_tiers",
+        type=str,
+        default="",
+        help="Weighted SNR tiers as min:max[:weight] comma-separated (e.g. "
+        "'15:20:0.5,8:15:0.35,5:8:0.15'). When set, overrides uniform "
+        "noise_snr_min/max sampling.",
+    )
+    p.add_argument(
+        "--noise_post_lufs",
+        type=float,
+        default=None,
+        help="If set (e.g. -23), normalize loudness after mixing noise (BS.1770 "
+        "when pyloudnorm is installed).",
+    )
+    p.add_argument(
         "--noise_dir",
         type=str,
         default="",
@@ -670,6 +685,15 @@ def main():
                 "[augment] noise_dirs=%s files=%d"
                 % (",".join(roots), augment_cfg.noise_library.num_files)
             )
+        if augment_cfg.noise_snr_tiers:
+            print("[augment] noise_snr_tiers=%r" % (augment_cfg.noise_snr_tiers,))
+        else:
+            print(
+                "[augment] noise_snr_range=%.1f-%.1f dB"
+                % (augment_cfg.noise_snr_min, augment_cfg.noise_snr_max)
+            )
+        if augment_cfg.noise_post_lufs is not None:
+            print("[augment] noise_post_lufs=%.1f" % augment_cfg.noise_post_lufs)
         if augment_cfg.nospeech.enabled:
             ns = augment_cfg.nospeech
             print(

@@ -10,10 +10,13 @@ import soundfile as sf
 
 from finetuning.noise_augmentation import (
     NoiseLibrary,
+    SnrTier,
     apply_add_noise,
     maybe_add_noise,
     mix_noise_at_snr,
+    parse_noise_snr_tiers,
     prepare_noise_segment,
+    sample_snr_db,
 )
 
 
@@ -104,6 +107,45 @@ class NoiseAugmentationTest(unittest.TestCase):
             wav, 16000, rng, prob=1.0, snr_min=5.0, snr_max=20.0, library=None
         )
         self.assertEqual(out.shape, wav.shape)
+        self.assertFalse(np.allclose(out, wav))
+
+    def test_parse_noise_snr_tiers(self):
+        tiers = parse_noise_snr_tiers("15:20:0.5,8:15:0.5")
+        self.assertEqual(len(tiers), 2)
+        self.assertEqual(tiers[0], SnrTier(15.0, 20.0, 0.5))
+        self.assertEqual(tiers[1], SnrTier(8.0, 15.0, 0.5))
+        self.assertEqual(parse_noise_snr_tiers(""), ())
+
+    def test_sample_snr_db_respects_tier_bounds(self):
+        rng = random.Random(123)
+        tiers = (SnrTier(15.0, 20.0, 1.0),)
+        for _ in range(20):
+            snr = sample_snr_db(rng, tiers=tiers, snr_min=0.0, snr_max=100.0)
+            self.assertGreaterEqual(snr, 15.0)
+            self.assertLessEqual(snr, 20.0)
+
+    def test_mix_noise_post_lufs_keeps_shape(self):
+        sr = 16000
+        t = np.linspace(0, 1.0, sr, endpoint=False, dtype=np.float32)
+        wav = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        out = mix_noise_at_snr(wav, snr_db=10.0, sr=sr, post_lufs=-23.0)
+        self.assertEqual(out.shape, wav.shape)
+        self.assertEqual(out.dtype, np.float32)
+
+    def test_maybe_add_noise_with_tiers(self):
+        wav = np.random.randn(16000).astype(np.float32) * 0.05
+        rng = random.Random(7)
+        tiers = parse_noise_snr_tiers("18:20:1.0")
+        out = maybe_add_noise(
+            wav,
+            16000,
+            rng,
+            prob=1.0,
+            snr_min=0.0,
+            snr_max=1.0,
+            library=None,
+            snr_tiers=tiers,
+        )
         self.assertFalse(np.allclose(out, wav))
 
 

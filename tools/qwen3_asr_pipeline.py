@@ -545,6 +545,8 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "noise_prob": "--noise_prob",
         "noise_snr_min": "--noise_snr_min",
         "noise_snr_max": "--noise_snr_max",
+        "noise_snr_tiers": "--noise_snr_tiers",
+        "noise_post_lufs": "--noise_post_lufs",
         "noise_dir": "--noise_dir",
         "noise_dirs": "--noise_dirs",
         "specaug_prob": "--specaug_prob",

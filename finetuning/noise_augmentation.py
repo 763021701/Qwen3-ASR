@@ -7,11 +7,98 @@ import glob
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import librosa
 import numpy as np
 import torch
+
+try:
+    import pyloudnorm as pyln
+
+    _LUFS_METERS: dict[int, pyln.Meter] = {}
+
+    def _integrated_lufs(wav: np.ndarray, sr: int) -> Optional[float]:
+        if len(wav) < int(0.4 * sr) or float(np.max(np.abs(wav))) < 1e-6:
+            return None
+        meter = _LUFS_METERS.get(sr)
+        if meter is None:
+            meter = _LUFS_METERS[sr] = pyln.Meter(sr)
+        try:
+            return float(meter.integrated_loudness(wav.astype(np.float64)))
+        except Exception:
+            return None
+
+    def normalize_to_lufs(wav: np.ndarray, sr: int, target_lufs: float) -> np.ndarray:
+        cur = _integrated_lufs(wav, sr)
+        if cur is None or not np.isfinite(cur):
+            return wav
+        out = pyln.normalize.loudness(wav.astype(np.float64), cur, float(target_lufs))
+        peak = float(np.max(np.abs(out)))
+        if peak > 1.0:
+            out = out / peak * 0.99
+        return out.astype(np.float32, copy=False)
+
+except ImportError:
+
+    def normalize_to_lufs(wav: np.ndarray, sr: int, target_lufs: float) -> np.ndarray:
+        rms = float(np.sqrt(np.mean(wav**2))) + 1e-12
+        target_rms = 10 ** (float(target_lufs) / 20.0)
+        out = wav * (target_rms / rms)
+        peak = float(np.max(np.abs(out)))
+        if peak > 1.0:
+            out = out / peak * 0.99
+        return out.astype(np.float32, copy=False)
+
+
+@dataclass(frozen=True)
+class SnrTier:
+    """Weighted SNR range sampled uniformly within [snr_min, snr_max]."""
+
+    snr_min: float
+    snr_max: float
+    weight: float = 1.0
+
+
+def parse_noise_snr_tiers(spec: str) -> Tuple[SnrTier, ...]:
+    """Parse ``min:max[:weight]`` tiers separated by commas."""
+    raw = (spec or "").strip()
+    if not raw:
+        return ()
+    tiers: list[SnrTier] = []
+    for part in raw.split(","):
+        piece = part.strip()
+        if not piece:
+            continue
+        fields = [x.strip() for x in piece.split(":")]
+        if len(fields) not in (2, 3):
+            raise ValueError(
+                f"Invalid noise_snr_tiers entry {piece!r}; expected min:max or min:max:weight"
+            )
+        lo, hi = float(fields[0]), float(fields[1])
+        weight = float(fields[2]) if len(fields) == 3 else 1.0
+        if weight <= 0:
+            raise ValueError(f"Tier weight must be positive, got {weight} in {piece!r}")
+        tiers.append(SnrTier(snr_min=lo, snr_max=hi, weight=weight))
+    if not tiers:
+        return ()
+    return tuple(tiers)
+
+
+def sample_snr_db(
+    rng: random.Random,
+    *,
+    tiers: Sequence[SnrTier],
+    snr_min: float,
+    snr_max: float,
+) -> float:
+    if tiers:
+        weights = [t.weight for t in tiers]
+        tier = rng.choices(list(tiers), weights=weights, k=1)[0]
+        lo, hi = tier.snr_min, tier.snr_max
+    else:
+        lo, hi = snr_min, snr_max
+    return rng.uniform(min(lo, hi), max(lo, hi))
 
 
 def prepare_noise_segment(noise_wav: np.ndarray, length: int) -> np.ndarray:
@@ -26,7 +113,12 @@ def prepare_noise_segment(noise_wav: np.ndarray, length: int) -> np.ndarray:
 
 
 def mix_noise_at_snr(
-    wav: np.ndarray, snr_db: float, noise_wav: Optional[np.ndarray] = None
+    wav: np.ndarray,
+    snr_db: float,
+    noise_wav: Optional[np.ndarray] = None,
+    *,
+    sr: Optional[int] = None,
+    post_lufs: Optional[float] = None,
 ) -> np.ndarray:
     """Mix noise at the given SNR (dB).
 
@@ -50,7 +142,10 @@ def mix_noise_at_snr(
     peak = mixed.abs().max()
     if peak > 1.0:
         mixed = mixed / peak
-    return mixed.numpy().astype(np.float32)
+    out = mixed.numpy().astype(np.float32)
+    if post_lufs is not None and sr is not None and sr > 0:
+        out = normalize_to_lufs(out, int(sr), float(post_lufs))
+    return out
 
 
 def apply_add_noise(
@@ -132,13 +227,16 @@ def maybe_add_noise(
     snr_min: float,
     snr_max: float,
     library: Optional[NoiseLibrary] = None,
+    snr_tiers: Sequence[SnrTier] = (),
+    post_lufs: Optional[float] = None,
 ) -> np.ndarray:
     """Apply AddNoise augmentation with probability ``prob``."""
     if rng.random() >= prob:
         return wav
-    lo, hi = snr_min, snr_max
-    snr = rng.uniform(min(lo, hi), max(lo, hi))
+    snr = sample_snr_db(rng, tiers=snr_tiers, snr_min=snr_min, snr_max=snr_max)
     noise_wav = None
     if library is not None and library.enabled:
         noise_wav = library.sample_segment(len(wav), sr, rng)
-    return mix_noise_at_snr(wav, snr, noise_wav=noise_wav)
+    return mix_noise_at_snr(
+        wav, snr, noise_wav=noise_wav, sr=sr, post_lufs=post_lufs
+    )
