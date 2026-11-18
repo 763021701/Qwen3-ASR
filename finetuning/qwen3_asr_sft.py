@@ -218,6 +218,7 @@ class AudioAugmentConfig:
     noise_snr_min: float = 5.0
     noise_snr_max: float = 20.0
     noise_dir: str = ""
+    noise_dirs: Tuple[str, ...] = ()
     specaug_prob: float = 0.5
     specaug_time_mask_param: int = 50
     specaug_freq_mask_param: int = 27
@@ -239,11 +240,26 @@ class AudioAugmentConfig:
                 "pip install --no-deps 'torchaudio==2.8.0+cu128' "
                 "--index-url https://download.pytorch.org/whl/cu128"
             ) from e
-        self.noise_library = NoiseLibrary.from_dir(self.noise_dir)
+        self.noise_library = NoiseLibrary.from_dirs(self._resolved_noise_dirs())
         self._specaug_masks = _build_specaug_transforms(self)
+
+    def _resolved_noise_dirs(self) -> Tuple[str, ...]:
+        dirs: list[str] = []
+        single = (self.noise_dir or "").strip()
+        if single:
+            dirs.append(single)
+        for item in self.noise_dirs:
+            path = (item or "").strip()
+            if path and path not in dirs:
+                dirs.append(path)
+        return tuple(dirs)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "AudioAugmentConfig":
+        raw_noise_dirs = getattr(args, "noise_dirs", None) or []
+        noise_dirs = tuple(
+            str(d).strip() for d in raw_noise_dirs if str(d).strip()
+        )
         return cls(
             enabled=bool(getattr(args, "augment", 0)),
             augment_prob=float(getattr(args, "augment_prob", 1.0)),
@@ -257,6 +273,7 @@ class AudioAugmentConfig:
             noise_snr_min=float(getattr(args, "noise_snr_min", 5.0)),
             noise_snr_max=float(getattr(args, "noise_snr_max", 20.0)),
             noise_dir=str(getattr(args, "noise_dir", "") or ""),
+            noise_dirs=noise_dirs,
             specaug_prob=float(getattr(args, "specaug_prob", 0.5)),
             specaug_time_mask_param=int(getattr(args, "specaug_time_mask_param", 50)),
             specaug_freq_mask_param=int(getattr(args, "specaug_freq_mask_param", 27)),
@@ -1239,6 +1256,14 @@ def parse_args():
         help="Directory of real noise wavs (e.g. DNS-Challenge noise_fullband). "
         "When set, AddNoise samples real noise files instead of synthetic white noise.",
     )
+    p.add_argument(
+        "--noise_dirs",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Additional noise roots; may be passed multiple times. "
+        "Merged with --noise_dir into one sampling pool.",
+    )
     p.add_argument("--specaug_prob", type=float, default=0.5)
     p.add_argument("--specaug_time_mask_param", type=int, default=50)
     p.add_argument("--specaug_freq_mask_param", type=int, default=27)
@@ -1423,9 +1448,10 @@ def main():
             % (augment_cfg.speed_prob, augment_cfg.noise_prob, augment_cfg.specaug_prob)
         )
         if augment_cfg.noise_library is not None and augment_cfg.noise_library.enabled:
+            roots = augment_cfg._resolved_noise_dirs()
             print(
-                "[augment] noise_dir=%s files=%d"
-                % (augment_cfg.noise_dir, augment_cfg.noise_library.num_files)
+                "[augment] noise_dirs=%s files=%d"
+                % (",".join(roots), augment_cfg.noise_library.num_files)
             )
         if augment_cfg.nospeech.enabled:
             ns = augment_cfg.nospeech

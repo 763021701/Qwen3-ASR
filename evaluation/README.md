@@ -181,3 +181,4 @@ For the pathology/radiology POC sets (radiology contains substantial Cantonese/E
 
 - `data/README.md` — manifest locations
 - `docs/finetune_pipeline.md` — pipeline wrapper usage
+- `docs/qwen3_asr_poc_experiment_report.md` — POC SFT campaign 操作、结论与 2026-11 权重清理记录

@@ -546,6 +546,7 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
         "noise_snr_min": "--noise_snr_min",
         "noise_snr_max": "--noise_snr_max",
         "noise_dir": "--noise_dir",
+        "noise_dirs": "--noise_dirs",
         "specaug_prob": "--specaug_prob",
         "specaug_time_mask_param": "--specaug_time_mask_param",
         "specaug_freq_mask_param": "--specaug_freq_mask_param",
@@ -569,8 +570,16 @@ def stage_train(config: Dict[str, Any], dry_run: bool) -> None:
     cmd.extend(["--train_file", paths["train"], "--eval_file", paths["dev"], "--output_dir", output_dir])
     for key, flag in option_map.items():
         val = training.get(key)
-        if val is not None and key in training:
-            cmd.extend([flag, str(val)])
+        if val is None or key not in training:
+            continue
+        if key == "noise_dirs":
+            items = val if isinstance(val, (list, tuple)) else str(val).split(",")
+            for item in items:
+                part = str(item).strip()
+                if part:
+                    cmd.extend([flag, part])
+            continue
+        cmd.extend([flag, str(val)])
     extra_eval_sets = training.get("extra_eval_sets") or {}
     if not isinstance(extra_eval_sets, dict):
         raise ValueError("training.extra_eval_sets must be a mapping of name to jsonl/csv path.")

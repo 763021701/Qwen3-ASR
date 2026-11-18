@@ -1,6 +1,6 @@
 # Qwen3-ASR POC 微调实验报告
 
-更新日期：2026-10-29
+更新日期：2026-11-18
 
 ## 1. 范围与结论
 
@@ -28,6 +28,10 @@
 12. 2026-10-27 录音环境增强（mega-asr-sim）：仅用 tts_radiology 训练时，7 场景 ×3 退化种子的环境增强把 radiology95 从 69.70% 降到 **42.47%**（greedy）/ **41.19%（no_repeat_ngram=4）**；再叠加**双模型取较短组合**（E4-564 + E13-752，均 nng4，无监督）达到 **39.36%，<40% 目标达成**（holdout19 54.68% vs 单模型 59.75%）。有效成分是目标域噪声多样性 + 场景混合，真实 RIR、LUFS 对齐、干净混合、severity 过滤、freesound 噪声、温和噪声均无效；POC53 为 31.3%（基座 41.41%、病理冠军 7.65%，相对基座是改善而非遗忘，但未达病理部署水平）（见 §4）。
 13. 2026-10-28 真实目标域混训：7–13% 真实病理最佳（M2 38.11%），23% 开始稀释（39.79）、3.3% 不足（41.52）；**soup(M1-600, M2b-780) = radiology95 37.12% / holdout19 48.61% / POC53 13.53%**。同日 m1_yt（M1 + 全量 YouTube 36,428 行/164.8h）单模型 radiology95 **36.39%**（ckpt-2100）/ holdout19 52.91% / POC53 14.71%，但 all95 受第 14 条的 train76 文本泄漏影响。
 14. 2026-10-29 语言先验清洗（**负结果**）+ 发现 sim 文本泄漏：ep1 的 177/4,001 条 TTS 文本与 radiology95 参考共享 ≥8-gram（train76 23/76 片段、平均覆盖 14.5% 参考词、最高 60%；holdout19 2/19、5.2%），因此**此前所有 sim 系实验的 radiology95 绝对值都含 train76 文本泄漏，holdout19 才是公平集**。清洗版（ep1 去污 3,800 + RADX_slref 16,030 + 粤语三音色 945 + 真实 2,714 + 严格 YouTube 3,247；1 个环境种子；26,421 行 / 63.7h）best ckpt-600 为 radiology95 **41.44%** / holdout19 **56.96%** / POC53 **11.88%**（radiology 混训分支新低；病理冠军仍为 7.65%）。radiology 侧显著退化，且干净子集同样更差（tr76_clean 38.25 vs M1 33.51；ho19_clean 62.54 vs m1_yt 57.86），**不是去污造成**；best ckpt 在 600/826，也**不是欠拟合**。主因是把 sim 从 3 seed（每文本 9 次声学实现）降到 1 seed（1 次）：E4 已验证 1→3 seed 值 4.65pp，本次相对 m1_yt 退化 5.05pp，量级吻合。语言先验本身未被公平检验（见 §4）。
+15. 2026-11-10 **unified-7** 七源统一 SFT：在 plus0821 冠军配方上比较「直接 50/50 混训 2 epoch」与「两阶段 synth80 → real75」；两阶段 ckpt-1400 为 POC53 **8.12%** / radiology95 **38.18%** / holdout19 **57.22%**（WER），三方均优于 direct mix，相对 champion 在 radiology 上约 **-28pp**（见 §4）。
+16. 2026-11-12 **balanced v2** 两阶段（四合成源均衡采样）：与 unified-7 同 curriculum，但合成侧按源均衡；stage2 ckpt-1400 的 radiology95 **55.77%** 明显差于 unified-7 stage2（38.18%），POC53/holdout19 与 unified-7 接近，**不优于 unified-7**（见 §4）。
+17. 2026-11 **small-data 三 probe**（约 1,451 条真实域）：在极小真实数据上验证噪声增强与合成子集；POC53 约 17–19% WER，**denoise+noise_aug 使 radiology95 崩到 83%**，说明在数据极少时不能把 champion 级噪声增强原样套用（见 §4）。
+18. 2026-11-16 **AuT-only 两阶段**：stage1 只训 encoder（真实域 + VC）；stage2 全参混训。dev/test 泄漏版（53 条 POC 在 train 中）POC53 **2.94%** 不可作独立测试；**noleak** stage2（ckpt-2800）POC53 **8.47%** / radiology95 **54.53%** / holdout19 **59.75%**（WER），radiology 仍差于 unified-7。code-switch 集的主指标宜看 MER（`outputs/poc_autonly_noleak_comparison.json`；合约见 `evaluation/baselines/poc_mer_history_hybrid.json`）（见 §4）。
 
 ## 2. 统一评测约定
 
@@ -43,6 +47,8 @@
 
 - 53 条 `dev` 同时被用于早停和部分结果选择，不能视为严格独立测试；
 - 标签中出现文字 `period`、`26 SS 12099` 与 `26SS12099`、`SN 1` 与 `SN1` 等格式差异，可能把语义正确的输出计为 WER。当前评测已统一数字、乘号、单位和逐字母缩写；`period`、编号粘连等结构化规则仍未合并。
+
+2026-11 起重训 campaign 的 radiology95 / holdout19 除 corpus WER 外，在对比表中同时记录 **MER**（`tools/eval_unified7_scheme.py`；`normalize_english` → MASR `normalize_for_mer`）。历史 MER 快照见 [`evaluation/baselines/poc_mer_history_hybrid.json`](../evaluation/baselines/poc_mer_history_hybrid.json)；AuT-only 最新 MER 见 `outputs/poc_autonly_noleak_comparison.json`。
 
 ## 3. 数据演化
 
@@ -324,9 +330,9 @@ radiology 此前从未进入监督训练，只作为 `training.extra_eval_sets`�
 4. 权重平均只在**不同配比**之间有效（M1+M2b = 37.12，M1+M2 = 37.71）；同配比不同种子平均反而变差（39.21），三模型 soup 38.48。预测集成两个成员 37.30，加入第三个成员变差（39.28）。
 5. 注意选择偏差：37.12% 是在 radiology95 上从约 6 个 soup 中挑出的；独立子集 holdout19 上 soup = 48.61%，仍优于旧最优组合 54.68%，排序一致，但绝对数字应视为略偏乐观。
 
-产物：`data/radiology_mix/RESULTS_mix.md`（完整明细）、`data/poc_train_radiology_mix_{m1,m2,m2b,m2c,m4,raw,realonly}/`、`configs/poc_radiology_mix_*.yaml`、`outputs/soup_mix_m1_m2b`（**37.12% 最优单模型**）、组件 checkpoint `outputs/poc_radiology_mix_{m1_1ep/checkpoint-600,m2_1ep/checkpoint-1295,m2b_1ep/checkpoint-780,m2c_1ep/checkpoint-1040}`。
+产物：`configs/poc_radiology_mix_*.yaml`、`data/poc_train_radiology_mix_*` manifest（若仍存在于仓库）、各 `outputs/poc_radiology_mix_*_1ep/` 下的 **eval 与日志**（多数 full-FT 权重已在此前轮次删除）。soup 单模型 **37.12% / 48.61% / 13.53%** 指标见上文表格；`outputs/soup_mix_m1_m2b`（M1-600 与 M2b-780 权重平均）已于 **2026-11-18** 删除（约 3.9G），不再保留可加载权重。
 
-2026-11-04 清理：删除 `m2b_1ep/checkpoint-780`（约 12G），最终模型仍由 `outputs/soup_mix_m1_m2b` 保留。
+2026-11-04 清理：删除 `m2b_1ep/checkpoint-780`（约 12G），当时保留 soup 合并权重；2026-11-18 连 soup 合并目录一并删除，结论仅留本报告与当时 eval 记录。
 
 ### 2026-10-29 语言先验清洗（负结果）与 sim 文本泄漏
 
@@ -475,6 +481,79 @@ probe 显示 CTC-600 的 Val CER **35.8%** vs baseline **45.7%**（holdout19
 `archive/configs/`，诊断数据与输出移至 `archive/data/`、`archive/outputs/`；两份
 CTC 文档保留为负结果记录。同日的 AuT-only（冻结 LLM）对照实验产物一并删除。
 
+### 2026-11-10 unified-7 七源统一 SFT
+
+动机：在 YouTube 多数丢失后，用**固定七源**（tts_pathology、tts_radiology、llm_text_syn、粤语两表、real_target_domain、youtube_med_en 确定性采样）重建 plus0821 量级 mix，比较直接混训与两阶段 curriculum。
+
+数据：[`tools/build_unified_manifests.py`](../tools/build_unified_manifests.py) → `data/poc_train_unified7/`（统计见 `manifest_stats.json`）。评测三集：`data/eval_unified7/` + POC53 dev/test（53 条，**用于 CER 选点**）；radiology95 与 holdout19 为训后 `tools/eval_unified7_scheme.py` 报告（MER 对 radiology/holdout 使用 `normalize_english` → MASR `normalize_for_mer`，见 `evaluation/baselines/poc_mer_history_hybrid.json`）。
+
+| 方案 | 训练量 | best ckpt | POC53 WER | radiology95 WER | holdout19 WER |
+|---|---:|---|---:|---:|---:|
+| direct mix 2 ep | 104k 行 / 286 h | 2900 | 9.06% | 38.55% | 66.84% |
+| stage1 synth80 1 ep | 80.6k / 179 h | 1400 | 9.65% | 43.64% | 53.16% |
+| **stage2 real75 1 ep** | 56.5k / 191 h | **1400** | **8.12%** | **38.18%** | **57.22%** |
+
+操作：`tools/run_unified7_chain.sh`（或 `run_unified7_remaining_chain.sh` 断点续跑）；stage2 的 `model_path` 由链脚本写入 stage1 best CER。配置：`configs/poc_unified7_{directmix_2ep,stage1_synth80_1ep,stage2_real75_1ep}.yaml`。
+
+结论：两阶段在 POC53、radiology95、holdout19 上均优于 direct mix；相对 plus0821 champion（7.65% / 66.47% / 64.30%）略差 POC、大幅改善 radiology。合成文本覆盖诊断见 `outputs/poc_unified7_text_coverage.md`。
+
+产物（指标）：`outputs/poc_unified7_comparison.json`、`outputs/poc_unified7_baselines.json`、`outputs/poc_unified7_results.md`。**保留权重（2026-11-18）**：`outputs/poc_unified7_stage2_real75_1ep/checkpoint-1400`；stage1 / directmix 已 prune 至仅 eval 元数据。
+
+### 2026-11-12 balanced v2 两阶段（对照 unified-7）
+
+动机：unified-7 的合成侧按源小时占比采样；v2 在**相同总合成/真实小时**下对四合成源**均衡行数**采样，检验「源均衡」是否改善 code-switch / radiology。
+
+数据：`data/poc_train_unified_v2/`（[`tools/build_unified_manifests.py`](../tools/build_unified_manifests.py) 建池；[`tools/build_balanced_manifest.py`](../tools/build_balanced_manifest.py) + [`tools/build_two_stage_manifests.py`](../tools/build_two_stage_manifests.py) 建 dist_balanced / two_stage manifest；见 `configs/poc_v2_stage{1,2}_*_1ep.yaml`）。
+
+| 阶段 | best ckpt | POC53 | radiology95 | holdout19 |
+|---|---|---:|---:|---:|
+| v2 stage1 synth80 | 1300 | 9.88% | 59.73% | 54.68% |
+| v2 stage2 real75 | 1400 | 8.82% | 55.77% | 57.22% |
+| unified-7 stage2（对照） | 1400 | 8.12% | **38.18%** | 57.22% |
+
+操作：`tools/run_v2_two_stage_chain.sh`（`run_v2_two_stage_autoresume_chain.sh` 可断点续跑）。
+
+结论：**v2 stage2 在 radiology95 上远差于 unified-7**（+17.6pp），POC/holdout 相近；源均衡未带来收益。MER 见 baseline 键 `v2_stage1_1300` / `v2_stage2_1400`。
+
+产物：`outputs/poc_v2_two_stage_comparison.json`。**2026-11-18**：整目录 `outputs/poc_v2_stage{1,2}_*_1ep` 已删（约 24G）；数字保留于 comparison JSON 与 `evaluation/baselines/poc_mer_history_hybrid.json`。
+
+### 2026-11 small-data 三 probe
+
+动机：在 **~1,451 条 / ~3.16 h** 真实目标域上，隔离三项因素：（1）仅 raw、关闭 noise_aug；（2）raw+denoised + champion 噪声增强；（3）在（2）基础上再加 ablate 合成子集。
+
+操作：`tools/build_small_experiment_manifests.py` → `data/poc_small_experiments/`；`tools/run_small_experiments_chain.sh` 顺序训练三路；评测同 unified-7 三集。
+
+| probe | best ckpt | POC53 | radiology95 | holdout19 |
+|---|---|---:|---:|---:|
+| realraw_noaug | 20 | 19.18% | 55.62% | 69.37% |
+| realdenoise_aug | 40 | 17.65% | **83.07%** | 71.14% |
+| synth_ab_aug | 300 | 17.41% | 76.00% | 75.70% |
+
+结论：极小真实数据可把 POC 压到 ~17% 但远非 champion；**champion 级 noise_aug 在 n≈1.5k 时严重伤害 radiology**；加合成子集未救 radiology。逐 clip 错误模式见 `outputs/poc_small_experiments_analysis.json`（汇总指标亦在 `outputs/poc_small_experiments_eval.json` 与 baseline `small_*`）。
+
+**2026-11-18**：三路 `outputs/poc_small_*_1ep` 已删（约 36G）；`eval_best` 与 predictions 不再可访问，勿依赖 JSON 内绝对路径。
+
+### 2026-11-16 AuT-only 两阶段（encoder 预热 + 全参混训）
+
+动机：在 unified-7 数据布局上，先 **只训 AuT encoder**（真实域 + VC 拷贝），再全参 stage2，观察是否减轻 catastrophic 与改善 radiology。
+
+两套 manifest：**leaked**（53 条 POC 进 train，与早期实验一致，dev=CER 选点）与 **noleak**（`data/poc_autonly_noleak/`，dev 与 test 音频不进 train）。
+
+| 运行 | best ckpt | POC53 WER | radiology95 WER | holdout19 WER | 备注 |
+|---|---|---:|---:|---:|---|
+| noleak stage1 real+VC | 150 | 17.29% | 60.35% | 72.66% | encoder-only |
+| **noleak stage2 all** | **2800** | **8.47%** | 54.53% | 59.75% | 公平 POC 对照 |
+| leaked stage2 all | 4200 | **2.94%** | 40.01% | 56.20% | POC **泄漏**，仅作上界 |
+| unified-7 stage2 | 1400 | 8.12% | **38.18%** | 57.22% | 对照 |
+
+MER（noleak / leaked stage2，hybrid 合约）：noleak stage2 POC **9.27%** / r95 **51.31%** / ho19 **53.74%**；leaked stage2 **3.55%** / **39.09%** / **52.32%**（见 `outputs/poc_autonly_noleak_comparison.json`）。
+
+操作：`tools/build_autonly_manifests.py`；`tools/run_autonly_two_stage_chain.sh`（leaked）、`tools/run_autonly_noleak_chain.sh`（noleak）；配置 `configs/poc_autonly_*` / `poc_autonly_noleak_*`。
+
+结论：**noleak 公平 POC 与 unified-7 接近，但 radiology 仍显著差于 unified-7**；leaked 版 radiology WER 更好（40%）仍落后于 unified-7（38%），且 POC 数字不可对外报。stage1 权重若不做 ablation 可删；**2026-11-18 保留**：`poc_unified7_stage2_real75_1ep`、`poc_autonly_stage2_all_1ep`（leaked 对照）、`poc_autonly_noleak_stage{1,2}_*`（noleak 主线）。
+
+产物：`outputs/poc_autonly_comparison.json`、`outputs/poc_autonly_noleak_comparison.json`；仍有权重的 run 保留 `eval_best/`。
+
 ## 5. GRPO 数据挖掘
 
 挖掘实现为 [`tools/mine_qwen3_asr_grpo_data.py`](../tools/mine_qwen3_asr_grpo_data.py)，产物在 [`grpo_g16_mining`](../archive/outputs/poc_train_real_tcga_1to3_5silence_none_grpo_g16_mining)。每个候选音频使用同一 prompt/audio evidence 生成 16 条 rollout，使用 ground-truth text 计算 WER，并根据 mean/best/std/worst 分桶。
@@ -557,6 +636,23 @@ GRPO 实现为 [`finetuning/qwen3_asr_grpo.py`](../finetuning/qwen3_asr_grpo.py)
 ### 2026-10-21 radiology oracle 归档
 
 radiology-only oracle 是诊断实验，不在 plus0821 主线内。1-epoch 与 5-epoch 的配置、manifest、权重和评测已移到 [`archive/`](../archive/README.md)。**2026-10-23：因旧标签失效，归档产物（权重、manifest、评测、配置）已全部删除**；新标签 manifest 由 `tools/prepare_radiology_oracle.py` 重建，重跑见「oracle v2」。`tools/prepare_radiology_oracle.py` 保留在 `tools/`。
+
+### 2026-11-18 unified-7 / v2 / small / soup 权重清理
+
+在结论已写入本报告 §4 与 `outputs/poc_*_comparison.json`、`evaluation/baselines/poc_mer_history_hybrid.json` 后，删除以下 **full-FT 目录**（约 61G）：
+
+- `outputs/poc_small_{realraw_noaug,realdenoise_aug,synth_ab_aug}_1ep`
+- `outputs/poc_v2_stage{1_synth80,2_real75}_1ep`
+- `outputs/soup_mix_m1_m2b`
+
+**仍保留的 competitive 权重（截至本日）**：
+
+- plus0821 champion：`outputs/poc_train_..._plus0821_fromscratch600/checkpoint-3900`
+- unified-7 stage2：`outputs/poc_unified7_stage2_real75_1ep/checkpoint-1400`
+- AuT-only leaked stage2（泄漏对照）：`outputs/poc_autonly_stage2_all_1ep/checkpoint-4200`
+- AuT-only noleak：`outputs/poc_autonly_noleak_stage1_realvc_1ep/checkpoint-150`、`outputs/poc_autonly_noleak_stage2_all_1ep/checkpoint-2800`
+
+删权重后勿依赖 `outputs/poc_small_experiments_eval.json` 或已删目录下的 `eval_best` 路径；汇总 WER/MER 以 baseline JSON 与本报告表格为准。
 
 ## 9. 后续建议
 

@@ -7,7 +7,7 @@ import glob
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Sequence
 
 import librosa
 import numpy as np
@@ -64,17 +64,25 @@ def apply_add_noise(
 class NoiseLibrary:
     """Directory-backed pool of real noise wav files for online augmentation."""
 
-    noise_dir: str = ""
+    noise_dirs: tuple[str, ...] = ()
     _files: list[str] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
-        noise_dir = (self.noise_dir or "").strip()
-        if not noise_dir:
+        dirs = tuple(d.strip() for d in self.noise_dirs if (d or "").strip())
+        self.noise_dirs = dirs
+        if not dirs:
             self._files = []
             return
-        noise_files = glob.glob(os.path.join(noise_dir, "**", "*.wav"), recursive=True)
+        seen: set[str] = set()
+        noise_files: list[str] = []
+        for noise_dir in dirs:
+            for path in glob.glob(os.path.join(noise_dir, "**", "*.wav"), recursive=True):
+                real = os.path.realpath(path)
+                if real not in seen:
+                    seen.add(real)
+                    noise_files.append(path)
         if not noise_files:
-            raise FileNotFoundError(f"No .wav noise files found under {noise_dir!r}")
+            raise FileNotFoundError(f"No .wav noise files found under {list(dirs)!r}")
         self._files = noise_files
 
     @property
@@ -91,7 +99,15 @@ class NoiseLibrary:
         noise_dir = (noise_dir or "").strip()
         if not noise_dir:
             return None
-        return cls(noise_dir=noise_dir)
+        return cls.from_dirs([noise_dir])
+
+    @classmethod
+    def from_dirs(cls, noise_dirs: Sequence[str]) -> Optional["NoiseLibrary"]:
+        """Return a library spanning one or more roots, or ``None`` when unset."""
+        dirs = tuple(d.strip() for d in noise_dirs if (d or "").strip())
+        if not dirs:
+            return None
+        return cls(noise_dirs=dirs)
 
     def sample_segment(
         self, num_samples: int, sr: int, rng: random.Random

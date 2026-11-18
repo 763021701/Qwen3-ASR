@@ -72,6 +72,23 @@ class NoiseAugmentationTest(unittest.TestCase):
             assert seg is not None
             self.assertEqual(len(seg), 8000)
 
+    def test_noise_library_from_dirs_merges_roots(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            sf.write(
+                os.path.join(a, "a.wav"),
+                np.random.randn(800).astype(np.float32),
+                16000,
+            )
+            sf.write(
+                os.path.join(b, "b.wav"),
+                np.random.randn(800).astype(np.float32),
+                16000,
+            )
+            lib = NoiseLibrary.from_dirs([a, b])
+            self.assertIsNotNone(lib)
+            assert lib is not None
+            self.assertEqual(lib.num_files, 2)
+
     def test_maybe_add_noise_prob_zero_unchanged(self):
         wav = np.ones(1000, dtype=np.float32) * 0.1
         rng = random.Random(0)

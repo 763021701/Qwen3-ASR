@@ -484,6 +484,14 @@ def parse_args():
         help="Directory of real noise wavs (e.g. DNS-Challenge noise_fullband). "
         "When set, AddNoise samples real noise files instead of synthetic white noise.",
     )
+    p.add_argument(
+        "--noise_dirs",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Additional noise roots; may be passed multiple times. "
+        "Merged with --noise_dir into one sampling pool.",
+    )
     p.add_argument("--specaug_prob", type=float, default=0.5)
     p.add_argument("--specaug_time_mask_param", type=int, default=50)
     p.add_argument("--specaug_freq_mask_param", type=int, default=27)
@@ -657,9 +665,10 @@ def main():
             % (augment_cfg.speed_prob, augment_cfg.noise_prob, augment_cfg.specaug_prob)
         )
         if augment_cfg.noise_library is not None and augment_cfg.noise_library.enabled:
+            roots = augment_cfg._resolved_noise_dirs()
             print(
-                "[augment] noise_dir=%s files=%d"
-                % (augment_cfg.noise_dir, augment_cfg.noise_library.num_files)
+                "[augment] noise_dirs=%s files=%d"
+                % (",".join(roots), augment_cfg.noise_library.num_files)
             )
         if augment_cfg.nospeech.enabled:
             ns = augment_cfg.nospeech
