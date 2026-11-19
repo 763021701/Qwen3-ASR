@@ -1,0 +1,362 @@
+# 1000-hour robustness mix for 中 / 英 / 粤 / 中方言.
+#
+# One mixture, one augmentation recipe. The 500h point is a checkpoint of this
+# run (step 13400), not a separate mix. Acceptance is the full benchmark
+# against base Qwen3-ASR-1.7B.
+#
+# Weights are hour targets and sum to 1000, so weight_mode=hours with
+# total_hours=1000 reproduces them exactly. Do not multiply these weights by
+# 10 for a ~10k-hour run: cap meeting / Wu / MAGICDATA heavy / AMI near one
+# epoch, and put extra hours only into GigaSpeech, WenetSpeech, KeSpeech,
+# Yue, Chuan (once the stable range grows), and Loquacious large.
+#
+# Hour targets:
+#   English 266: gigaspeech 130, loquacious_small 100, ami_ihm 20, ami_sdm 16
+#   Mandarin read 182: wenetspeech 142, magicdata_read 32, conv 6, heavy 2
+#   Meeting zh 72: alimeeting_near 44, alimeeting_far 28
+#   Dialect 400: kespeech 80, chuan 100, wu 120 (65/27/19/9), yue 180
+# WenetSpeech is 142h (not 146) so the Giga -30h and Wenet -38h cuts fund
+# the Wu increase of 68h and the mix stays at 1000h.
+#
+# New corpora have no dataset_info.json. estimated_hours is a size-based
+# guess of the FILTERED corpus at 80 MB/h of flac, used only to decide how
+# many shards one pass opens. The mixer balances on real sample duration.
+# Far-field AliMeeting and AMI SDM skip mega-asr-sim scenarios only.
+data:
+  sources:
+    - name: gigaspeech
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/Gigaspeech-train-clean
+      path_in_repo: webdataset
+      split: train
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: English
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 12518
+      shard_exclude:
+        - webdataset/gigaspeech-train-00000-00007.tar
+        - webdataset/gigaspeech-train-00008-00015.tar
+      weight: 130
+
+    - name: loquacious_small
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/LoquaciousSet
+      path_in_repo: small
+      split: train
+      shard_pattern: "loq-small-*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: English
+      text_template: "language {language}<asr_text>{text}"
+      # 15.95 GB small/ at 80 MB/h. small ⊂ large; a later 10k run draws large.
+      estimated_hours: 199
+      weight: 100
+
+    - name: ami_ihm
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/AMI
+      path_in_repo: ihm/train
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: English
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 51
+      weight: 20
+
+    - name: ami_sdm
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/AMI
+      path_in_repo: sdm/train
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: English
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 49
+      weight: 16
+
+    - name: wenetspeech
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/WenetSpeech
+      path_in_repo: TRAIN
+      split: train
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 9290
+      shard_exclude:
+        - TRAIN/wenetspeech-L-00000000-00000001.tar
+      weight: 142
+
+    - name: magicdata_read
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/MAGICDATA-Mandarin
+      path_in_repo: MAGICDATA-Mandarin-Read
+      split: train
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 711.9
+      weight: 32
+
+    - name: magicdata_conv
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/MAGICDATA-Mandarin
+      path_in_repo: MAGICDATA-Mandarin-Conversational
+      split: train
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 128.7
+      weight: 6
+
+    - name: magicdata_heavy
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/MAGICDATA-Mandarin
+      path_in_repo: MAGICDATA-Mandarin-Heavy-Accent
+      split: train
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 18.4
+      weight: 2
+
+    - name: alimeeting_near
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/AliMeeting
+      path_in_repo: near/train
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 103
+      weight: 44
+
+    - name: alimeeting_far
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/AliMeeting
+      path_in_repo: far/train
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 113
+      weight: 28
+
+    - name: kespeech
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/KeSpeech
+      path_in_repo: /
+      split: train
+      shard_pattern: "kespeech-train_*.tar"
+      fields: {audio: flac, text: txt, meta: json}
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 1397
+      weight: 80
+
+    - name: chuan
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/WenetSpeech-Chuan
+      path_in_repo: labeled
+      split: train
+      shard_pattern: "audios_*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language {language}<asr_text>{text}"
+      # Stable range only: labeled/audios_001-000.tar .. audios_020-008.tar
+      # (185 tars, 190.46 GB at the time of writing). Later uploads stay out.
+      estimated_hours: 2380
+      shard_exclude:
+        - audios_020-009.tar
+        - audios_020-0[1-9][0-9].tar
+        - audios_020-[1-9]*.tar
+        - audios_02[1-9]-*.tar
+        - audios_0[3-9][0-9]-*.tar
+        - audios_[1-9][0-9][0-9]-*.tar
+      weight: 100
+
+    # JSON language is "zh", which would override source.language. The
+    # template hardcodes Chinese so the meta code is unused.
+    - name: wu_shanghai
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/Internet-Dialect-Wu
+      path_in_repo: shanghai
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language Chinese<asr_text>{text}"
+      estimated_hours: 159
+      shard_exclude:
+        - "*low_quality*"
+      weight: 65
+
+    - name: wu_suzhou
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/Internet-Dialect-Wu
+      path_in_repo: suzhou
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language Chinese<asr_text>{text}"
+      estimated_hours: 65
+      shard_exclude:
+        - "*low_quality*"
+      weight: 27
+
+    - name: wu_ningbo
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/Internet-Dialect-Wu
+      path_in_repo: ningbo
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language Chinese<asr_text>{text}"
+      estimated_hours: 47
+      shard_exclude:
+        - "*low_quality*"
+      weight: 19
+
+    - name: wu_hangzhou
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/Internet-Dialect-Wu
+      path_in_repo: hangzhou
+      split: train
+      shard_pattern: "*.tar"
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Chinese
+      text_template: "language Chinese<asr_text>{text}"
+      estimated_hours: 21
+      shard_exclude:
+        - "*low_quality*"
+      weight: 9
+
+    - name: yue
+      backend: webdataset
+      provider: modelscope
+      repo_id: huangpppu/WenetSpeech-Yue
+      path_in_repo: labeled
+      split: train
+      fields: {audio: flac, meta: json}
+      text_key: text
+      language: Cantonese
+      text_template: "language {language}<asr_text>{text}"
+      estimated_hours: 18580
+      shard_exclude:
+        - labeled/part_000-000.tar
+        - labeled/part_000-001.tar
+      weight: 180
+
+  mixture:
+    seed: 42
+    total_hours: 1000
+    weight_mode: hours
+    sample_shuffle_buffer: 1000
+    repeat_small_sources: true
+
+  # Reuses the warm 2000h cache. Caps on a shared repo root are the root
+  # budget: each source of that repo sets the same value. Wu shards are
+  # ~0.2-1GB across four cities; AliMeeting and AMI are ~1GB across two
+  # splits. MAGICDATA and KeSpeech keep the 2000h caps.
+  cache:
+    dir: ../../outputs/ms_cache_2000h
+    max_gb: 8
+    per_source_max_gb:
+      kespeech: 10
+      magicdata_read: 21
+      magicdata_conv: 21
+      magicdata_heavy: 21
+      loquacious_small: 10
+      alimeeting_near: 12
+      alimeeting_far: 12
+      ami_ihm: 12
+      ami_sdm: 12
+      wu_shanghai: 16
+      wu_suzhou: 16
+      wu_ningbo: 16
+      wu_hangzhou: 16
+    min_free_gb: 25
+    prefetch_shards: 1
+    max_concurrent_downloads: 1
+    retries: 3
+    timeout_sec: 600
+    index_ttl_sec: 86400
+
+  augmentation:
+    speed:
+      enabled: true
+      prob: 0.5
+      factors: [0.9, 0.95, 1.0, 1.05, 1.1]
+    specaug:
+      enabled: true
+      prob: 0.5
+      time_mask_param: 50
+      freq_mask_param: 27
+      num_time_masks: 2
+      num_freq_masks: 2
+    simulation:
+      enabled: true
+      spool_dir: ../../outputs/aug_spool_mix1000
+      scenarios:
+        - noise
+        - far_field
+        - obstructed
+        - echo_reverb
+        - recording
+        - distortion
+        - dropout
+        - far_field+noise
+        - echo_reverb+noise
+        - obstructed+noise
+      clean_prob: 0.25
+      clean_sources:
+        - alimeeting_far
+        - ami_sdm
+      severity_min: 0.2
+      severity_max: 0.80
+      noise_dir: ../../data/augmentation/noise
+      reverb_mode: mixed
+      rir_dir: ../../data/augmentation/rir
+      rir_cache_files: 128
+      rir_real_prob: 0.7
+      rir_mix_prob: 0.8
+      num_simulators: 8
+      clean_queue_size: 128
+      ready_queue_size: 512
+      audio_format: wav
+      max_spool_gb: 5
+      stall_timeout_sec: 1800
+      stats_log_interval_sec: 60
