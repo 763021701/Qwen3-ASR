@@ -45,7 +45,7 @@ Available in the full-finetune script. Freeze `model.thinker.audio_tower` params
 ### LoRA — `finetuning/qwen3_asr_sft_lora.py`
 Add low-rank adapters via PEFT library to specific module groups controlled by `--lora_scope`. Freezes all base model params; only LoRA adapter weights are trainable (~1% of params). Checkpoints contain only adapter weights (~5-20MB).
 
-**Per-module learning rates**: `CastFloatInputsTrainer.create_optimizer()` groups params by `_lora_group(name)` into `encoder` / `aligner` / `llm` / `other` buckets:
+**Per-module learning rates**: the shared `CastFloatInputsTrainer.create_optimizer()` groups params by `LoraTrainer._lr_group(name)` into `encoder` / `aligner` / `llm` / `other` buckets:
 
 | Group | Controlled by | Matched params |
 |-------|--------------|----------------|

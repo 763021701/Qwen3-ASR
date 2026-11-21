@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Full-parameter fine-tuning for Qwen3-ASR.
-# For LoRA fine-tuning, see finetuning/qwen3_asr_sft_lora.py.
+# Full-parameter fine-tuning for Qwen3-ASR. This module also holds the data
+# recipe, trainer, callbacks and training run that
+# finetuning/qwen3_asr_sft_lora.py reuses, so both entry points train the same way.
 import argparse
 import json
 import math
@@ -461,6 +462,7 @@ class CastFloatInputsTrainer(Trainer):
 
     @staticmethod
     def _lr_group(name: str) -> str:
+        """Bucket a trainable parameter for the per-module learning rates."""
         if any(
             marker in name
             for marker in (
@@ -506,11 +508,9 @@ class CastFloatInputsTrainer(Trainer):
                         "[optimizer] %-7s: %d params  lr=%.1e"
                         % (group, sum(p.numel() for p in parameters), lrs[group])
                     )
-        self.optimizer = torch.optim.AdamW(
-            optimizer_groups,
-            betas=(self.args.adam_beta1, self.args.adam_beta2),
-            eps=self.args.adam_epsilon,
-        )
+        # Same optimizer class and kwargs (fused, betas, eps) as Trainer's default path.
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args, self.model)
+        self.optimizer = optimizer_cls(optimizer_groups, **optimizer_kwargs)
         return self.optimizer
 
 
@@ -967,6 +967,7 @@ class StopOnMetricPlateauCallback(TrainerCallback):
             ]
             if values:
                 self.best_value = min(values)
+                print(f"[early-stop] restored best {self.metric}={self.best_value:.6f}")
         return control
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
@@ -1028,8 +1029,9 @@ class CurriculumEpochCallback(TrainerCallback):
         return control
 
 
-def parse_args():
-    p = argparse.ArgumentParser("Qwen3-ASR Finetuning (full-parameter)")
+def build_arg_parser(description: str) -> argparse.ArgumentParser:
+    """Arguments shared by the full-parameter and LoRA entry points."""
+    p = argparse.ArgumentParser(description)
 
     # Paths
     p.add_argument("--model_path", type=str, default="Qwen/Qwen3-ASR-1.7B")
@@ -1068,26 +1070,7 @@ def parse_args():
     p.add_argument("--epochs", type=float, default=1)
     p.add_argument("--log_steps", type=int, default=10)
     p.add_argument("--lr_scheduler_type", type=str, default="linear")
-    p.add_argument("--lr_encoder", type=float, default=None)
-    p.add_argument("--lr_aligner", type=float, default=None)
-    p.add_argument("--lr_llm", type=float, default=None)
     p.add_argument("--warmup_ratio", type=float, default=0.02)
-    p.add_argument(
-        "--freeze_modules",
-        type=str,
-        default="",
-        help="Comma-separated parts to freeze: encoder,aligner,llm. "
-             "encoder=audio_tower minus the aligner projections; "
-             "aligner=audio_tower conv_out/proj1/proj2; llm=thinker.model+lm_head. "
-             "Empty (default) trains all parts.",
-    )
-    p.add_argument(
-        "--freeze_audio_tower",
-        type=int,
-        default=0,
-        choices=(0, 1),
-        help="Deprecated alias for --freeze_modules encoder,aligner.",
-    )
     p.add_argument(
         "--curriculum",
         type=int,
@@ -1125,7 +1108,7 @@ def parse_args():
         "--save_best_total_limit",
         type=int,
         default=0,
-        help="When >0 with --eval_file, retain only this many checkpoints with the lowest eval_loss.",
+        help="When >0 with --eval_file, retain this many checkpoints by --save_best_metric.",
     )
     p.add_argument(
         "--save_best_metric",
@@ -1135,7 +1118,7 @@ def parse_args():
         help="Metric for --save_best_total_limit: eval_loss, WER, or normalized CER.",
     )
     p.add_argument("--wer_eval_samples", type=int, default=400,
-                   help="Capped dev subset size for the WER selection metric (balanced by random subset).")
+                   help="Random dev subset size for the WER/CER selection metric; 0 uses all samples.")
     p.add_argument("--wer_batch_size", type=int, default=4,
                    help="Inference batch size for the WER selection generation.")
     p.add_argument("--wer_max_new_tokens", type=int, default=512,
@@ -1155,6 +1138,34 @@ def parse_args():
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--resume", type=int, default=0)
 
+    return p
+
+
+def parse_args():
+    p = build_arg_parser("Qwen3-ASR Finetuning (full-parameter)")
+    p.add_argument("--lr_encoder", type=float, default=None,
+                   help="Speech-encoder learning rate. Setting any --lr_* enables "
+                        "per-module optimizer groups; unset parts use --lr.")
+    p.add_argument("--lr_aligner", type=float, default=None,
+                   help="Audio-text aligner learning rate (unset: --lr).")
+    p.add_argument("--lr_llm", type=float, default=None,
+                   help="LLM learning rate (unset: --lr).")
+    p.add_argument(
+        "--freeze_modules",
+        type=str,
+        default="",
+        help="Comma-separated parts to freeze: encoder,aligner,llm. "
+             "encoder=audio_tower minus the aligner projections; "
+             "aligner=audio_tower conv_out/proj1/proj2; llm=thinker.model+lm_head. "
+             "Empty (default) trains all parts.",
+    )
+    p.add_argument(
+        "--freeze_audio_tower",
+        type=int,
+        default=0,
+        choices=(0, 1),
+        help="Deprecated alias for --freeze_modules encoder,aligner.",
+    )
     return p.parse_args()
 
 
@@ -1270,9 +1281,16 @@ def build_training_data(args_cli) -> TrainingData:
     )
 
 
-def main():
-    args_cli = parse_args()
+def run_training(args_cli, prepare_model, trainer_cls=CastFloatInputsTrainer) -> None:
+    """Train with the shared data recipe, checkpoint selection and resume logic.
 
+    ``prepare_model(model, args_cli)`` sets the trainable parameters in place
+    (part freezing, LoRA) and returns any extra callbacks it needs.
+    """
+    # DataLoader workers must start fresh instead of forking a process that
+    # already owns a CUDA context (fork-after-CUDA caused silent worker deaths
+    # and resource-sharer failures).
+    torch.multiprocessing.set_start_method("spawn", force=True)
     training_data = build_training_data(args_cli)
     train_dataset = training_data.dataset
     custom_train_sampler = training_data.sampler
@@ -1296,18 +1314,7 @@ def main():
     patch_outer_forward(model)
 
     model.generation_config = GenerationConfig.from_model_config(model.config)
-    frozen_parts = list(parse_parts(args_cli.freeze_modules))
-    if args_cli.freeze_audio_tower == 1:
-        frozen_parts += [p for p in ("encoder", "aligner") if p not in frozen_parts]
-    if frozen_parts:
-        set_part_freeze(model, frozen_parts)
-        part_counts = count_part_parameters(model)
-        for part in PARTS:
-            total, trainable = part_counts[part]
-            print(
-                "[freeze] %-7s total_params=%d trainable_params=%d"
-                % (part, total, trainable)
-            )
+    model_callbacks = list(prepare_model(model, args_cli) or [])
 
     augment_cfg = training_data.augmentation
     train_collator = DataCollatorForQwen3ASRFinetuning(
@@ -1401,12 +1408,11 @@ def main():
                 ranking_filename=ranking_filename,
             )
         )
-    if frozen_parts:
-        callbacks.append(KeepFrozenPartsCallback(frozen_parts))
+    callbacks.extend(model_callbacks)
     if args_cli.curriculum:
         callbacks.append(CurriculumEpochCallback(train_collator, args_cli.curriculum_switch_epoch))
 
-    trainer = CastFloatInputsTrainer(
+    trainer = trainer_cls(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -1442,6 +1448,28 @@ def main():
         if trainer.args.process_index == 0 and training_data.service is not None:
             print("[augment] service stats: %s" % training_data.service.snapshot())
         training_data.close()
+
+
+def freeze_requested_parts(model, args_cli) -> List[TrainerCallback]:
+    """Apply --freeze_modules / --freeze_audio_tower for full-parameter training."""
+    frozen_parts = list(parse_parts(args_cli.freeze_modules))
+    if args_cli.freeze_audio_tower == 1:
+        frozen_parts += [p for p in ("encoder", "aligner") if p not in frozen_parts]
+    if not frozen_parts:
+        return []
+    set_part_freeze(model, frozen_parts)
+    part_counts = count_part_parameters(model)
+    for part in PARTS:
+        total, trainable = part_counts[part]
+        print(
+            "[freeze] %-7s total_params=%d trainable_params=%d"
+            % (part, total, trainable)
+        )
+    return [KeepFrozenPartsCallback(frozen_parts)]
+
+
+def main():
+    run_training(parse_args(), prepare_model=freeze_requested_parts)
 
 
 if __name__ == "__main__":

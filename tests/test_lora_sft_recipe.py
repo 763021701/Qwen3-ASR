@@ -35,6 +35,19 @@ class LoraSftRecipeTest(unittest.TestCase):
         self.assertEqual(args.wer_max_new_tokens, 512)
         self.assertEqual(args.extra_eval_set, ["radiology=dev.csv"])
 
+    def test_lora_and_sft_share_training_arguments(self):
+        from finetuning import qwen3_asr_sft as sft
+
+        with patch.object(sys, "argv", ["sft", "--data_config", "data.yaml"]):
+            sft_args = vars(sft.parse_args())
+        with patch.object(sys, "argv", ["lora", "--data_config", "data.yaml"]):
+            lora_args = vars(lora.parse_args())
+        shared = (set(sft_args) & set(lora_args)) - {"lr_encoder", "lr_aligner", "lr_llm"}
+        self.assertEqual(
+            {key: sft_args[key] for key in shared}, {key: lora_args[key] for key in shared}
+        )
+        self.assertEqual(set(sft_args) - set(lora_args), {"freeze_modules", "freeze_audio_tower"})
+
     def test_trainers_disable_loss_kwargs_for_gradient_accumulation(self):
         from transformers import TrainingArguments
         from finetuning.qwen3_asr_sft import CastFloatInputsTrainer as SftTrainer
@@ -42,7 +55,7 @@ class LoraSftRecipeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as output:
             args = TrainingArguments(output_dir=output, use_cpu=True, report_to="none")
             sft = SftTrainer(model=torch.nn.Linear(2, 2), args=args)
-            lora_trainer = lora.CastFloatInputsTrainer(
+            lora_trainer = lora.LoraTrainer(
                 model=torch.nn.Linear(2, 2), args=args
             )
         self.assertFalse(sft.model_accepts_loss_kwargs)
@@ -82,7 +95,7 @@ class LoraSftRecipeTest(unittest.TestCase):
             ).train(resume_from_checkpoint=resume)
             return batch_sizes
 
-        for trainer_cls in (SftTrainer, lora.CastFloatInputsTrainer):
+        for trainer_cls in (SftTrainer, lora.LoraTrainer):
             with self.subTest(trainer=trainer_cls.__module__):
                 with tempfile.TemporaryDirectory() as output:
                     train(trainer_cls, output, batch_size=8, max_steps=1)
@@ -99,18 +112,37 @@ class LoraSftRecipeTest(unittest.TestCase):
                 self.assertEqual(saved, ["checkpoint-1", "checkpoint-2", "checkpoint-4"])
                 self.assertEqual(state["eval_steps"], 2)
 
-    def test_optimizer_honors_the_same_training_arguments_as_sft(self):
+    def test_per_module_optimizer_honors_training_arguments(self):
         from transformers import Trainer, TrainingArguments
+        from finetuning.qwen3_asr_sft import CastFloatInputsTrainer as SftTrainer
 
         with tempfile.TemporaryDirectory() as output:
             args = TrainingArguments(output_dir=output, use_cpu=True, report_to="none")
             baseline = Trainer(model=torch.nn.Linear(2, 2), args=args).create_optimizer()
-            adapter = lora.CastFloatInputsTrainer(
-                model=torch.nn.Linear(2, 2), args=args
-            ).create_optimizer()
-        self.assertEqual(type(adapter), type(baseline))
-        for key in ("betas", "eps", "fused"):
-            self.assertEqual(adapter.defaults[key], baseline.defaults[key])
+            for trainer_cls in (SftTrainer, lora.LoraTrainer):
+                with self.subTest(trainer=trainer_cls.__name__):
+                    optimizer = trainer_cls(
+                        model=torch.nn.Linear(2, 2), args=args, lr_llm=1e-4
+                    ).create_optimizer()
+                    self.assertEqual(type(optimizer), type(baseline))
+                    for key in ("betas", "eps", "fused"):
+                        self.assertEqual(optimizer.defaults[key], baseline.defaults[key])
+
+    def test_lora_lr_groups_cover_only_adapter_weights(self):
+        from finetuning.qwen3_asr_sft import CastFloatInputsTrainer as SftTrainer
+
+        peft = "thinker.base_model.model."
+        cases = {
+            peft + "audio_tower.layers.0.self_attn.q_proj.lora_A.default.weight": "encoder",
+            peft + "audio_tower.proj1.lora_B.default.weight": "aligner",
+            peft + "model.layers.3.mlp.up_proj.lora_A.default.weight": "llm",
+            peft + "audio_tower.layers.0.fc1.bias": "other",
+        }
+        for name, group in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(lora.LoraTrainer._lr_group(name), group)
+        self.assertEqual(SftTrainer._lr_group("thinker.model.layers.3.mlp.up_proj.weight"), "llm")
+        self.assertEqual(SftTrainer._lr_group("thinker.audio_tower.layers.0.fc1.bias"), "encoder")
 
     def test_extra_eval_strips_asr_prefix(self):
         from finetuning.qwen3_asr_sft import _load_extra_eval_items
@@ -141,8 +173,10 @@ class LoraSftRecipeTest(unittest.TestCase):
         self.assertEqual(preprocess({"audio": "sample.wav", "text": "text"})["noise_aug"], 1)
 
     def _collate(self, features, **kwargs):
+        from finetuning.qwen3_asr_sft import DataCollatorForQwen3ASRFinetuning
+
         processor = SimpleNamespace(tokenizer=SimpleNamespace(eos_token="EOS"))
-        collator = lora.DataCollatorForQwen3ASRFinetuning(processor, **kwargs)
+        collator = DataCollatorForQwen3ASRFinetuning(processor, **kwargs)
         data_module = importlib.import_module(collator.__class__.__module__)
         n = len(features)
         inputs = {
