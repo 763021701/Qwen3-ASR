@@ -7,6 +7,7 @@ https://github.com/NLPvv/mega-asr-sim (MIT, see LICENSE).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from collections import OrderedDict
@@ -17,6 +18,7 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import soundfile as sf
 
+from ..assets import read_asset_manifest
 from .primitives import PRIMITIVES
 from .scenarios import SCENARIOS, merge_chain
 from .severity import resolve_params
@@ -147,13 +149,30 @@ class RIRPool:
         sample_rate: int = 16000,
         max_cached_files: int = 128,
         real_prob: float = 1.0,
+        *,
+        manifest_path: Optional[str] = None,
+        split: Optional[str] = None,
     ):
         self.sample_rate = int(sample_rate)
         self.max_cached_files = max(1, int(max_cached_files))
         self.real_prob = float(real_prob)
         if not 0.0 <= self.real_prob <= 1.0:
             raise ValueError("real_prob must be in [0, 1].")
-        self.files: List[RIRInfo] = self._index_rirs(rir_dir) if rir_dir else []
+        if manifest_path and rir_dir:
+            raise ValueError("Use rir_manifest or rir_dir, not both.")
+        rows = read_asset_manifest(manifest_path, "rir", split) if manifest_path else []
+        self._assets = {row["path"]: row for row in rows}
+        self.manifest_sha256 = (
+            hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
+            if manifest_path else None
+        )
+        self.asset_split = rows[0]["split"] if rows else None
+        self.last_sample = None
+        self.files: List[RIRInfo] = [
+            RIRInfo(row["path"], row["source"],
+                    None if row["category"] == "unknown" else row["category"],
+                    row.get("room_id")) for row in rows
+        ] if manifest_path else (self._index_rirs(rir_dir) if rir_dir else [])
         if rir_dir and not self.files:
             logger.warning("No RIR files found under %s.", rir_dir)
         self._by_source: Dict[str, List[RIRInfo]] = {}
@@ -274,7 +293,12 @@ class RIRPool:
         info = candidates[int(rng.integers(len(candidates)))]
         rirs = self._load(info.path)
         channel = int(rng.integers(rirs.shape[1]))
-        return _prepare_real_rir(rirs[:, channel], self.sample_rate)
+        prepared = _prepare_real_rir(rirs[:, channel], self.sample_rate)
+        asset = self._assets.get(info.path, {})
+        self.last_sample = dict(path=str(info.path), channel=channel,
+                                asset_id=asset.get("asset_id"),
+                                group_id=asset.get("group_id")) if prepared is not None else None
+        return prepared
 
 
 class NoisePool:
@@ -285,10 +309,25 @@ class NoisePool:
         noise_dir: Optional[str] = None,
         sample_rate: int = 16000,
         max_cached_files: int = 64,
+        *,
+        manifest_path: Optional[str] = None,
+        split: Optional[str] = None,
     ):
         self.sample_rate = int(sample_rate)
         self.max_cached_files = max(1, int(max_cached_files))
-        self.files: List[Path] = _iter_audio_files(noise_dir) if noise_dir else []
+        if manifest_path and noise_dir:
+            raise ValueError("Use noise_manifest or noise_dir, not both.")
+        rows = read_asset_manifest(manifest_path, "noise", split) if manifest_path else []
+        self._assets = {row["path"]: row for row in rows}
+        self.manifest_sha256 = (
+            hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
+            if manifest_path else None
+        )
+        self.asset_split = rows[0]["split"] if rows else None
+        self.last_sample = None
+        self.files: List[Path] = [
+            row["path"] for row in rows
+        ] if manifest_path else (_iter_audio_files(noise_dir) if noise_dir else [])
         if noise_dir and not self.files:
             logger.warning(
                 "No noise files found under %s; noise scenarios will use white noise.",
@@ -337,6 +376,10 @@ class NoisePool:
             if len(wav) > num_samples
             else 0
         )
+        asset = self._assets.get(path, {})
+        self.last_sample = dict(path=str(path), start_sample=start,
+                                num_samples=num_samples, sample_rate=self.sample_rate,
+                                asset_id=asset.get("asset_id"), group_id=asset.get("group_id"))
         return wav[start : start + num_samples].copy()
 
 

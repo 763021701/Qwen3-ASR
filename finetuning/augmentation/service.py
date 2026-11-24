@@ -49,9 +49,12 @@ class SimulationConfig:
     speed_factor_min: Optional[float] = None
     speed_factor_max: Optional[float] = None
     noise_dir: Optional[str] = None
+    noise_manifest: Optional[str] = None
+    asset_split: str = "train"
     noise_cache_files: int = 64
     reverb_mode: str = "synthetic"
     rir_dir: Optional[str] = None
+    rir_manifest: Optional[str] = None
     rir_cache_files: int = 128
     rir_real_prob: float = 1.0
     rir_mix_prob: float = 0.8
@@ -100,8 +103,12 @@ class SimulationConfig:
             raise ValueError("speed_factor_min must be <= speed_factor_max.")
         if self.reverb_mode not in {"synthetic", "real", "mixed"}:
             raise ValueError("reverb_mode must be 'synthetic', 'real', or 'mixed'.")
-        if self.reverb_mode != "synthetic" and not self.rir_dir:
-            raise ValueError("rir_dir is required when reverb_mode is 'real' or 'mixed'.")
+        if self.asset_split not in {"train", "dev", "test"}:
+            raise ValueError("asset_split must be train, dev, or test.")
+        if (self.noise_dir and self.noise_manifest) or (self.rir_dir and self.rir_manifest):
+            raise ValueError("Use a directory or a manifest for each asset kind, not both.")
+        if self.reverb_mode != "synthetic" and not (self.rir_dir or self.rir_manifest):
+            raise ValueError("rir_dir or rir_manifest is required when reverb_mode is 'real' or 'mixed'.")
         if self.rir_cache_files < 1:
             raise ValueError("rir_cache_files must be >= 1.")
         if not 0.0 <= self.rir_real_prob <= 1.0:
@@ -145,9 +152,12 @@ class SimulationConfig:
             speed_factor_min=speed_factor_min,
             speed_factor_max=speed_factor_max,
             noise_dir=spec.noise_dir,
+            noise_manifest=spec.noise_manifest,
+            asset_split=spec.asset_split,
             noise_cache_files=spec.noise_cache_files,
             reverb_mode=spec.reverb_mode,
             rir_dir=spec.rir_dir,
+            rir_manifest=spec.rir_manifest,
             rir_cache_files=spec.rir_cache_files,
             rir_real_prob=spec.rir_real_prob,
             rir_mix_prob=spec.rir_mix_prob,
@@ -249,6 +259,9 @@ def augment_clean_sample(
     """Apply one deterministic mega-asr-sim scenario to a clean sample."""
     seed = _sample_seed(sample, config.seed)
     rng = np.random.default_rng(seed)
+    noise_pool.last_sample = None
+    if rir_pool is not None:
+        rir_pool.last_sample = None
     wav = _clean_audio(sample, config.sample_rate)
     metadata = {
         key: value
@@ -316,6 +329,15 @@ def augment_clean_sample(
             "sample_seed": int(seed),
         }
     )
+    metadata["augmentation_split"] = config.asset_split
+    for kind, pool in (("noise", noise_pool), ("rir", rir_pool)):
+        if pool is None:
+            continue
+        if pool.manifest_sha256:
+            metadata[kind + "_manifest_sha256"] = pool.manifest_sha256
+        if pool.last_sample:
+            metadata.update({kind + "_" + key: value
+                             for key, value in pool.last_sample.items()})
     return np.asarray(wav, dtype=np.float32), metadata
 
 
@@ -334,6 +356,8 @@ def simulator_worker(
             config.noise_dir,
             sample_rate=config.sample_rate,
             max_cached_files=config.noise_cache_files,
+            manifest_path=config.noise_manifest,
+            split=config.asset_split,
         )
         rir_pool = None
         if config.reverb_mode != "synthetic":
@@ -342,6 +366,8 @@ def simulator_worker(
                 sample_rate=config.sample_rate,
                 max_cached_files=config.rir_cache_files,
                 real_prob=config.rir_real_prob,
+                manifest_path=config.rir_manifest,
+                split=config.asset_split,
             )
             if not rir_pool.available:
                 raise RuntimeError(f"No RIR files found under {config.rir_dir!r}.")
@@ -497,11 +523,16 @@ class SimulationService:
                 sample_rate=self.config.sample_rate,
                 max_cached_files=1,
                 real_prob=self.config.rir_real_prob,
+                manifest_path=self.config.rir_manifest,
+                split=self.config.asset_split,
             )
             if not probe.available:
                 raise RuntimeError(
                     f"No RIR files found under {self.config.rir_dir!r}."
                 )
+        if self.config.noise_manifest:
+            NoisePool(manifest_path=self.config.noise_manifest,
+                      split=self.config.asset_split, max_cached_files=1)
         self.stats.started_at.value = time.time()
         try:
             for _ in range(self.config.num_simulators):

@@ -76,6 +76,9 @@ def materialize_robust_eval(
     seed: int = 42,
     noise_dir: Optional[str] = None,
     rir_dir: Optional[str] = None,
+    noise_manifest: Optional[str] = None,
+    rir_manifest: Optional[str] = None,
+    asset_split: str = "test",
     reverb_mode: str = "synthetic",
     rir_real_prob: float = 1.0,
     rir_mix_prob: float = 0.8,
@@ -91,8 +94,8 @@ def materialize_robust_eval(
     scenarios = tuple(scenarios)
     if not scenarios:
         raise ValueError("At least one scenario is required.")
-    if any("noise" in name.split("+") for name in scenarios) and not noise_dir:
-        raise ValueError("noise_dir is required for noise-based scenarios.")
+    if any("noise" in name.split("+") for name in scenarios) and not (noise_dir or noise_manifest):
+        raise ValueError("noise_dir or noise_manifest is required for noise-based scenarios.")
     if severity is not None:
         severity_min = severity_max = float(severity)
     if not 0.0 <= severity_min <= severity_max <= 1.0:
@@ -109,6 +112,9 @@ def materialize_robust_eval(
         scenarios=scenarios,
         clean_prob=0.0,
         noise_dir=noise_dir,
+        noise_manifest=noise_manifest,
+        rir_manifest=rir_manifest,
+        asset_split=asset_split,
         noise_cache_files=noise_cache_files,
         reverb_mode=reverb_mode,
         rir_dir=rir_dir,
@@ -127,6 +133,8 @@ def materialize_robust_eval(
         noise_dir,
         sample_rate=config.sample_rate,
         max_cached_files=noise_cache_files,
+        manifest_path=noise_manifest,
+        split=asset_split,
     )
     rir_pool = None
     if reverb_mode != "synthetic":
@@ -135,6 +143,8 @@ def materialize_robust_eval(
             sample_rate=config.sample_rate,
             max_cached_files=rir_cache_files,
             real_prob=rir_real_prob,
+            manifest_path=rir_manifest,
+            split=asset_split,
         )
         if not rir_pool.available:
             raise RuntimeError(f"No RIR files found under {rir_dir!r}.")
@@ -185,6 +195,8 @@ def materialize_robust_eval(
             item["simulated"] = bool(metadata["simulated"])
             item["sim_version"] = str(metadata["sim_version"])
             item["sample_seed"] = int(metadata["sample_seed"])
+            item.update({key: value for key, value in metadata.items()
+                         if key.startswith(("noise_", "rir_", "augmentation_"))})
             manifest.append(item)
 
     manifest_path = out_root / "eval.jsonl"
@@ -213,6 +225,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--noise_dir", default=None)
     parser.add_argument("--rir_dir", default=None)
+    parser.add_argument("--noise_manifest", default=None)
+    parser.add_argument("--rir_manifest", default=None)
+    parser.add_argument("--asset_split", default="test", choices=("train", "dev", "test"))
     parser.add_argument(
         "--reverb_mode", default="synthetic", choices=("synthetic", "real", "mixed")
     )
@@ -246,6 +261,9 @@ def main() -> None:
         copies=args.copies,
         seed=args.seed,
         noise_dir=args.noise_dir,
+        noise_manifest=args.noise_manifest,
+        rir_manifest=args.rir_manifest,
+        asset_split=args.asset_split,
         rir_dir=args.rir_dir,
         reverb_mode=args.reverb_mode,
         rir_real_prob=args.rir_real_prob,

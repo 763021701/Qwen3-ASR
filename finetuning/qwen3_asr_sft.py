@@ -1200,6 +1200,9 @@ def build_training_data(args_cli) -> TrainingData:
         raise RuntimeError("Data pipeline config is missing.")
     augmentation = AudioAugmentConfig.from_spec(pipeline.config.augmentation)
     simulation = pipeline.config.augmentation.simulation
+    if (simulation.enabled and (simulation.noise_manifest or simulation.rir_manifest)
+            and simulation.asset_split != "train"):
+        raise ValueError("Training augmentation manifests must use asset_split=train.")
     if simulation.enabled and simulation.clean_sources:
         known = {source.name for source in pipeline.sources}
         unknown = set(simulation.clean_sources) - known

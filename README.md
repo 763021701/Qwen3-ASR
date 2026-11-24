@@ -35,6 +35,8 @@ dev 的路径不完全同名，这些都不要拿去训练：`dev/`、WenetSpeec
 3. 开仿真时，`finetuning/augmentation/service.py` 用独立进程读干净音频、做退化、写入有上限的 spool，训练器再从 spool 读。Speed 在仿真进程里做，SpecAugment 在 collator 里做。
 4. 仿真场景固定 10 个：`noise`、`far_field`、`obstructed`、`echo_reverb`、`recording`、`distortion`、`dropout`、`far_field+noise`、`echo_reverb+noise`、`obstructed+noise`。`clean_prob: 0.25`。`alimeeting_far` 和 `ami_sdm` 本身是远场，不做仿真。
 
+噪声与 RIR 使用固定的 train/dev/test 清单，训练只读取 train；同源录音、同一房间和不同采样率版本绑定划分。清单生成、隔离验证和评测用法见 [增强素材划分](docs/augmentation_splits.md)。
+
 1000 小时配置：LoRA all，r=16，alpha=32，lr 2e-5，有效 batch 32，`max_steps=26800`。`save_steps=13400` 留下约 500 小时的检查点。
 
 扩到万小时时不要把这套权重乘 10。会议、吴语、AMI、MAGICDATA 重口音大约一个 epoch 封顶，多出来的小时只加到仍有余量的源。

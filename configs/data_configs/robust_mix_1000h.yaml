@@ -349,9 +349,11 @@ data:
         - ami_sdm
       severity_min: 0.2
       severity_max: 0.80
-      noise_dir: ../../data/augmentation/noise
+      # Frozen source/room-disjoint allowlists; never scan the complete asset roots.
+      asset_split: train
+      noise_manifest: ../../data/augmentation/splits/v1/noise.train.jsonl
       reverb_mode: mixed
-      rir_dir: ../../data/augmentation/rir
+      rir_manifest: ../../data/augmentation/splits/v1/rir.train.jsonl
       rir_cache_files: 128
       rir_real_prob: 0.7
       rir_mix_prob: 0.8

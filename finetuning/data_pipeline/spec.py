@@ -108,9 +108,12 @@ class SimulationSpec:
     clean_prob: float = 0.0
     clean_sources: Tuple[str, ...] = ()
     noise_dir: Optional[str] = None
+    noise_manifest: Optional[str] = None
+    asset_split: str = "train"
     noise_cache_files: int = 64
     reverb_mode: str = "synthetic"
     rir_dir: Optional[str] = None
+    rir_manifest: Optional[str] = None
     rir_cache_files: int = 128
     rir_real_prob: float = 1.0
     rir_mix_prob: float = 0.8
@@ -392,9 +395,17 @@ def _parse_simulation(raw: Any, base_dir: Optional[Path]) -> SimulationSpec:
             "simulation.reverb_mode must be 'synthetic', 'real', or 'mixed'."
         )
     rir_dir = _resolve_path(str(raw.get("rir_dir") or "") or None, base_dir)
-    if enabled and reverb_mode != "synthetic" and not rir_dir:
+    rir_manifest = _resolve_path(str(raw.get("rir_manifest") or "") or None, base_dir)
+    noise_dir = _resolve_path(str(raw.get("noise_dir") or "") or None, base_dir)
+    noise_manifest = _resolve_path(str(raw.get("noise_manifest") or "") or None, base_dir)
+    asset_split = str(raw.get("asset_split", "train"))
+    if asset_split not in {"train", "dev", "test"}:
+        raise ValueError("simulation.asset_split must be train, dev, or test.")
+    if (rir_dir and rir_manifest) or (noise_dir and noise_manifest):
+        raise ValueError("Use a directory or a manifest for each asset kind, not both.")
+    if enabled and reverb_mode != "synthetic" and not (rir_dir or rir_manifest):
         raise ValueError(
-            "simulation.rir_dir is required when reverb_mode is 'real' or 'mixed'."
+            "simulation.rir_dir or rir_manifest is required when reverb_mode is 'real' or 'mixed'."
         )
     rir_cache_files = int(raw.get("rir_cache_files", 128))
     if rir_cache_files < 1:
@@ -429,10 +440,13 @@ def _parse_simulation(raw: Any, base_dir: Optional[Path]) -> SimulationSpec:
         severity_max=severity_max,
         clean_prob=clean_prob,
         clean_sources=clean_sources,
-        noise_dir=_resolve_path(str(raw.get("noise_dir") or "") or None, base_dir),
+        noise_dir=noise_dir,
+        noise_manifest=noise_manifest,
+        asset_split=asset_split,
         noise_cache_files=max(1, int(raw.get("noise_cache_files", 64))),
         reverb_mode=reverb_mode,
         rir_dir=rir_dir,
+        rir_manifest=rir_manifest,
         rir_cache_files=rir_cache_files,
         rir_real_prob=rir_real_prob,
         rir_mix_prob=rir_mix_prob,
