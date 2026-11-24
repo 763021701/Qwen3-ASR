@@ -36,6 +36,7 @@ dev 的路径不完全同名，这些都不要拿去训练：`dev/`、WenetSpeec
 4. 仿真场景固定 10 个：`noise`、`far_field`、`obstructed`、`echo_reverb`、`recording`、`distortion`、`dropout`、`far_field+noise`、`echo_reverb+noise`、`obstructed+noise`。`clean_prob: 0.25`。`alimeeting_far` 和 `ami_sdm` 本身是远场，不做仿真。
 
 噪声与 RIR 使用固定的 train/dev/test 清单，训练只读取 train；同源录音、同一房间和不同采样率版本绑定划分。清单生成、隔离验证和评测用法见 [增强素材划分](docs/augmentation_splits.md)。
+全量测试集的固定 test 噪声腐败协议、真实场景排除规则及结果目录见 [全量噪声鲁棒性评测](docs/full_noise_benchmark.md)。
 
 1000 小时配置：LoRA all，r=16，alpha=32，lr 2e-5，有效 batch 32，`max_steps=26800`。`save_steps=13400` 留下约 500 小时的检查点。
 
