@@ -492,7 +492,11 @@ class Qwen3ASRAudioAttention(nn.Module):
         query_states = query_states.transpose(0, 1).unsqueeze(0)
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        # The encoder already knows these lengths on the host. Reuse them
+        # across layers instead of launching three metadata kernels per layer.
+        max_seqlen = kwargs.pop("max_seqlen", None)
+        if max_seqlen is None:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
@@ -678,24 +682,26 @@ class Qwen3ASRAudioEncoder(Qwen3ASRPreTrainedModel):
         aftercnn_lens (`torch.LongTensor` of shape `(batch_size,)`):
             mel length after cnn
         """
-        aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
-        chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
+        # Lengths are control metadata, not differentiable model inputs. Keep
+        # them on the host so Python slicing/list construction does not wait
+        # for a CUDA scalar at each chunk. get_audio_features transfers the
+        # whole batch once; direct encoder callers may still pass CUDA lengths.
+        feature_lengths = feature_lens.detach().cpu().tolist()
+        chunk_size = self.n_window * 2
+        chunk_lengths = [
+            min(chunk_size, length - start)
+            for length in feature_lengths
+            for start in range(0, length, chunk_size)
+        ]
+        aftercnn_lengths = [_get_feat_extract_output_lengths(length) for length in feature_lengths]
+        chunk_lengths_after_cnn = [_get_feat_extract_output_lengths(length) for length in chunk_lengths]
 
-        chunk_lengths = torch.tensor(
-            [self.n_window * 2] * chunk_num.sum(),
-            dtype=torch.long,
-            device=feature_lens.device,
-        )
-        tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
-        chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
-        chunk_lengths[chunk_lengths == 0] = self.n_window * 2
-
-        chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
+        chunk_list = input_features.T.split(chunk_lengths, dim=0)
         padded_feature = nn.utils.rnn.pad_sequence(chunk_list, batch_first=True).transpose(1, 2)
-        feature_lens_after_cnn = _get_feat_extract_output_lengths(chunk_lengths)
-        padded_mask_after_cnn = nn.utils.rnn.pad_sequence(
-            [torch.ones(length, dtype=torch.bool, device=padded_feature.device) for length in feature_lens_after_cnn],
-            batch_first=True,
+        max_chunk_length = max(chunk_lengths_after_cnn)
+        padded_mask_after_cnn = (
+            torch.arange(max_chunk_length, device=input_features.device).unsqueeze(0)
+            < torch.tensor(chunk_lengths_after_cnn, device=input_features.device).unsqueeze(1)
         )
         padded_feature = padded_feature.unsqueeze(1)
         # Split to chunk to avoid OOM during convolution
@@ -716,19 +722,24 @@ class Qwen3ASRAudioEncoder(Qwen3ASRPreTrainedModel):
         )
         padded_embed = padded_embed + positional_embedding
         hidden_states = padded_embed[padded_mask_after_cnn]
-        cu_chunk_lens = [0]
-        window_aftercnn = padded_mask_after_cnn.shape[-1] * (self.n_window_infer // (self.n_window * 2))
-        for cnn_len in aftercnn_lens:
-            cu_chunk_lens += [window_aftercnn] * (cnn_len // window_aftercnn)
-            remainder = cnn_len % window_aftercnn
-            if remainder != 0:
-                cu_chunk_lens += [remainder]
-        cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(-1, dtype=torch.int32)
+        cu_chunk_lens = []
+        window_aftercnn = max_chunk_length * (self.n_window_infer // chunk_size)
+        for cnn_len in aftercnn_lengths:
+            full_windows, remainder = divmod(cnn_len, window_aftercnn)
+            cu_chunk_lens.extend([window_aftercnn] * full_windows)
+            if remainder:
+                cu_chunk_lens.append(remainder)
+        cumulative_lengths = [0]
+        for length in cu_chunk_lens:
+            cumulative_lengths.append(cumulative_lengths[-1] + length)
+        cu_seqlens = torch.tensor(cumulative_lengths, device=input_features.device, dtype=torch.int32)
+        max_seqlen = max(cu_chunk_lens)
 
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(
                 hidden_states,
                 cu_seqlens,
+                max_seqlen=max_seqlen,
             )
 
             hidden_states = layer_outputs[0]
@@ -1121,10 +1132,13 @@ class Qwen3ASRThinkerForConditionalGeneration(Qwen3ASRPreTrainedModelForConditio
     
         # audio encoder do not support batch inference to keep precision
         audio_features = []
-        for input_feature, feature_len in zip(input_features, feature_lens):
+        # One batch-level transfer replaces repeated CUDA-to-Python scalar
+        # conversions in the serial encoder path; audio math/order is unchanged.
+        feature_lens = feature_lens.detach().cpu()
+        for index, (input_feature, feature_len) in enumerate(zip(input_features, feature_lens.tolist())):
             audio_output = self.audio_tower(
                 input_feature[:, :feature_len],
-                feature_lens=feature_len.unsqueeze(0),
+                feature_lens=feature_lens[index : index + 1],
             )
             audio_feature = audio_output.last_hidden_state
             audio_features.append(audio_feature)
