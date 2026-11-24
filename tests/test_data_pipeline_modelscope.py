@@ -250,5 +250,33 @@ class LocalWebDatasetProviderTest(unittest.TestCase):
             self.assertIn("close", calls)
 
 
+class RobustRecipeSplitTest(unittest.TestCase):
+    def test_modelscope_gigaspeech_recipes_exclude_dev_without_split_metadata(self):
+        from finetuning.data_pipeline.spec import load_data_config
+
+        root = Path(__file__).resolve().parents[1]
+        for recipe in (
+            "robust_mix_1000h.yaml", "robust_multilingual_2000h.yaml",
+            "robust_multilingual_pilot_200h.yaml",
+        ):
+            with self.subTest(recipe=recipe):
+                config = load_data_config(str(root / "configs/data_configs" / recipe))
+                source = next(item for item in config.sources if item.name == "gigaspeech")
+                with tempfile.TemporaryDirectory() as td:
+                    cache = ShardCache(source, CacheSpec(dir=td, min_free_gb=0))
+                    cache._files = [
+                        {"path": "webdataset/gigaspeech-dev-00000.tar", "size": 100},
+                        {"path": "webdataset/gigaspeech-test-00000.tar", "size": 100},
+                        {"path": "webdataset/gigaspeech-train-00000-00007.tar", "size": 100},
+                        {"path": "webdataset/gigaspeech-train-00016-00023.tar", "size": 100},
+                    ]
+                    cache._dataset_info_loaded = True
+                    try:
+                        selected = [shard.remote_path for shard in cache.index_source().shards]
+                    finally:
+                        cache.close()
+                self.assertEqual(selected, ["webdataset/gigaspeech-train-00016-00023.tar"])
+
+
 if __name__ == "__main__":
     unittest.main()

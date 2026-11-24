@@ -11,6 +11,8 @@ data:
       repo_id: huangpppu/Gigaspeech-train-clean
       path_in_repo: webdataset
       split: train
+      # The repository also contains a dev tar; split metadata is absent.
+      shard_pattern: "gigaspeech-train-*.tar"
       fields: {audio: flac, meta: json}
       text_key: text
       language: English
