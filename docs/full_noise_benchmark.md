@@ -1,5 +1,7 @@
 # HM-ASR 全量 test 噪声鲁棒性评测
 
+[2026-11-25 实验记录](experiments/2026-11-25-robust-mix-1000h-full-test-noise-v1.md)汇总了本轮实测结果及 MUSAN 人声分组分析。
+
 本轮使用当前 HM-ASR 启用测试集的全部有效语音，不使用此前每语料 200 句的抽样，
 不设 2–15 秒等时长过滤或截断。原始启用的 20 套数据中，按用户要求排除
 AliMeeting、AMI、Renji（含 easy/hard），剩余 16 套、143,549 条源语音、205.073 小时。
